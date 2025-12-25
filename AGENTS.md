@@ -17,4 +17,4 @@ zig build test
 
 ## References
 
-- [Zig 0.15 I/O API](docs/zig-0.15-io-api.md) - Critical API changes for I/O, ArrayList, JSON
+- [Zig 0.15 API](docs/zig-0.15-api.md) - Critical API changes for comptime, ArrayList, JSON, I/O

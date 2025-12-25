@@ -45,7 +45,7 @@ fn findCommand(name: []const u8) ?Handler {
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
+    defer if (gpa.deinit() == .leak) @panic("memory leak detected");
     const allocator = gpa.allocator();
 
     const args = try std.process.argsAlloc(allocator);
@@ -81,7 +81,11 @@ fn cmdVersion(_: Allocator, _: []const []const u8) !void {
 fn openStorage(allocator: Allocator) !sqlite.Storage {
     // Auto-create .beads/ directory
     fs.cwd().makeDir(BEADS_DIR) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
+        error.PathAlreadyExists => {
+            // Verify it's actually a directory
+            const stat = fs.cwd().statFile(BEADS_DIR) catch return err;
+            if (stat.kind != .directory) fatal("{s} exists but is not a directory\n", .{BEADS_DIR});
+        },
         else => return err,
     };
     return sqlite.Storage.open(allocator, BEADS_DB);
@@ -200,7 +204,7 @@ fn cmdAdd(allocator: Allocator, args: []const []const u8) !void {
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         if (getArg(args, &i, "-p")) |v| {
-            priority = std.fmt.parseInt(i64, v, 10) catch 2;
+            priority = std.fmt.parseInt(i64, v, 10) catch fatal("Invalid priority: {s}\n", .{v});
         } else if (getArg(args, &i, "-d")) |v| {
             description = v;
         } else if (getArg(args, &i, "-P")) |v| {
@@ -399,15 +403,15 @@ fn cmdBeadsUpdate(allocator: Allocator, args: []const []const u8) !void {
         if (getArg(args, &i, "--status")) |v| new_status = mapStatus(v);
     }
 
-    if (new_status) |status| {
-        var ts_buf: [40]u8 = undefined;
-        const now = try formatTimestamp(&ts_buf);
+    const status = new_status orelse fatal("--status required\n", .{});
 
-        var storage = try openStorage(allocator);
-        defer storage.close();
+    var ts_buf: [40]u8 = undefined;
+    const now = try formatTimestamp(&ts_buf);
 
-        try storage.updateStatus(args[0], status, now, null, null);
-    }
+    var storage = try openStorage(allocator);
+    defer storage.close();
+
+    try storage.updateStatus(args[0], status, now, null, null);
 }
 
 fn cmdBeadsClose(allocator: Allocator, args: []const []const u8) !void {
@@ -458,10 +462,10 @@ fn formatTimestamp(buf: []u8) ![]const u8 {
     const secs: u64 = @intCast(tm.tm_sec);
 
     const tz_offset_secs: i64 = tm.tm_gmtoff;
-    const tz_hours: i64 = @divTrunc(tz_offset_secs, 3600);
-    const tz_mins: u64 = @abs(@rem(tz_offset_secs, 3600)) / 60;
-    const tz_sign: u8 = if (tz_hours >= 0) '+' else '-';
-    const tz_hours_abs: u64 = @abs(tz_hours);
+    const tz_sign: u8 = if (tz_offset_secs >= 0) '+' else '-';
+    const tz_abs: u64 = @abs(tz_offset_secs);
+    const tz_hours_abs: u64 = tz_abs / 3600;
+    const tz_mins: u64 = (tz_abs % 3600) / 60;
 
     return std.fmt.bufPrint(buf, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}.{d:0>6}{c}{d:0>2}:{d:0>2}", .{
         year, month, day, hours, mins, secs, micros, tz_sign, tz_hours_abs, tz_mins,

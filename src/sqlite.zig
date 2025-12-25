@@ -646,8 +646,8 @@ pub fn hydrateFromJsonl(storage: *Storage, allocator: Allocator, jsonl_path: []c
         const closed_at = if (obj.get("closed_at")) |v| (if (v == .string) v.string else null) else null;
         const close_reason = if (obj.get("close_reason")) |v| (if (v == .string) v.string else null) else null;
 
-        // Map beads status to dots status
-        const status = if (std.mem.eql(u8, status_raw, "in_progress")) "active" else if (std.mem.eql(u8, status_raw, "closed")) "done" else status_raw;
+        // Map beads status to dots status (in_progress -> active, keep closed as-is)
+        const status = if (std.mem.eql(u8, status_raw, "in_progress")) "active" else status_raw;
 
         const issue = Issue{
             .id = id,
