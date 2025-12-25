@@ -83,6 +83,11 @@ pub fn main() !void {
 }
 
 fn openStorage(allocator: Allocator) !sqlite.Storage {
+    // Auto-create .beads/ directory
+    fs.cwd().makeDir(BEADS_DIR) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
     return sqlite.Storage.open(allocator, BEADS_DB);
 }
 
