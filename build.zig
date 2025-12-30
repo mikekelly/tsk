@@ -27,24 +27,7 @@ pub fn build(b: *std.Build) void {
     // Link SQLite - priority: source > static lib > system
     const sqlite_source = b.option([]const u8, "sqlite-source", "Path to sqlite3.c for static compilation");
     const use_system = b.option(bool, "system-sqlite", "Use system SQLite (dynamic linking)") orelse false;
-
-    if (sqlite_source) |src_path| {
-        // Compile SQLite from source for fully static binary
-        exe.addCSourceFile(.{
-            .file = .{ .cwd_relative = src_path },
-            .flags = &.{ "-DSQLITE_THREADSAFE=0", "-DSQLITE_OMIT_LOAD_EXTENSION" },
-        });
-        const src_dir = std.fs.path.dirname(src_path) orelse ".";
-        exe.root_module.addIncludePath(.{ .cwd_relative = src_dir });
-    } else if (use_system) {
-        exe.root_module.linkSystemLibrary("sqlite3", .{});
-    } else if (target.result.os.tag == .macos) {
-        // Static link on macOS (Homebrew path)
-        exe.addObjectFile(.{ .cwd_relative = "/opt/homebrew/Cellar/sqlite/3.51.1/lib/libsqlite3.a" });
-        exe.root_module.addIncludePath(.{ .cwd_relative = "/opt/homebrew/Cellar/sqlite/3.51.1/include" });
-    } else {
-        exe.root_module.linkSystemLibrary("sqlite3", .{});
-    }
+    linkSqlite(b, exe, target, sqlite_source, use_system);
 
     b.installArtifact(exe);
 
@@ -68,6 +51,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/tests.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
     test_mod.addOptions("build_options", test_options);
 
@@ -75,9 +59,58 @@ pub fn build(b: *std.Build) void {
         .root_module = test_mod,
     });
 
+    linkSqlite(b, tests, target, sqlite_source, use_system);
+
     const run_tests = b.addRunArtifact(tests);
     run_tests.step.dependOn(b.getInstallStep()); // Build main binary first
 
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_tests.step);
+}
+
+fn linkSqlite(
+    b: *std.Build,
+    step: *std.Build.Step.Compile,
+    target: std.Build.ResolvedTarget,
+    sqlite_source: ?[]const u8,
+    use_system: bool,
+) void {
+    if (sqlite_source) |src_path| {
+        step.addCSourceFile(.{
+            .file = .{ .cwd_relative = src_path },
+            .flags = &.{ "-DSQLITE_THREADSAFE=0", "-DSQLITE_OMIT_LOAD_EXTENSION" },
+        });
+        const src_dir = std.fs.path.dirname(src_path) orelse ".";
+        step.root_module.addIncludePath(.{ .cwd_relative = src_dir });
+        return;
+    }
+
+    if (use_system) {
+        step.root_module.linkSystemLibrary("sqlite3", .{});
+        return;
+    }
+
+    if (target.result.os.tag == .macos and linkHomebrewSqlite(b, step)) {
+        return;
+    }
+
+    step.root_module.linkSystemLibrary("sqlite3", .{});
+}
+
+fn linkHomebrewSqlite(b: *std.Build, step: *std.Build.Step.Compile) bool {
+    const prefixes = [_][]const u8{
+        "/opt/homebrew/opt/sqlite",
+        "/usr/local/opt/sqlite",
+    };
+
+    for (prefixes) |prefix| {
+        const lib_path = b.fmt("{s}/lib/libsqlite3.a", .{prefix});
+        if (std.fs.accessAbsolute(lib_path, .{})) |_| {
+            step.addObjectFile(.{ .cwd_relative = lib_path });
+            step.root_module.addIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{prefix}) });
+            return true;
+        } else |_| {}
+    }
+
+    return false;
 }
