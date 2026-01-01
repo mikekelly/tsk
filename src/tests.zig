@@ -668,6 +668,82 @@ test "prop: dependency cycle rejected" {
     try std.testing.expectError(error.DependencyCycle, cycle_result);
 }
 
+test "prop: delete cascade unblocks dependents" {
+    // Test that deleting a blocker unblocks its dependents
+    const allocator = std.testing.allocator;
+
+    const test_dir = setupTestDirOrPanic(allocator);
+    defer cleanupTestDirAndFree(allocator, test_dir);
+
+    var storage = openTestStorage(allocator, test_dir);
+    defer storage.close();
+
+    // Create blocker issue
+    const blocker = sqlite.Issue{
+        .id = "blocker",
+        .title = "Blocker",
+        .description = "",
+        .status = "open",
+        .priority = 2,
+        .issue_type = "task",
+        .assignee = null,
+        .created_at = fixed_timestamp,
+        .updated_at = fixed_timestamp,
+        .closed_at = null,
+        .close_reason = null,
+        .after = null,
+        .parent = null,
+    };
+    storage.createIssue(blocker) catch |err| {
+        std.debug.panic("create blocker: {}", .{err});
+    };
+
+    // Create dependent issue
+    const dependent = sqlite.Issue{
+        .id = "dependent",
+        .title = "Dependent",
+        .description = "",
+        .status = "open",
+        .priority = 2,
+        .issue_type = "task",
+        .assignee = null,
+        .created_at = fixed_timestamp,
+        .updated_at = fixed_timestamp,
+        .closed_at = null,
+        .close_reason = null,
+        .after = null,
+        .parent = null,
+    };
+    storage.createIssue(dependent) catch |err| {
+        std.debug.panic("create dependent: {}", .{err});
+    };
+
+    // Add dependency: dependent blocked by blocker
+    storage.addDependency("dependent", "blocker", "blocks", fixed_timestamp) catch |err| {
+        std.debug.panic("add dep: {}", .{err});
+    };
+
+    // Verify dependent is NOT ready (blocked)
+    const ready1 = storage.getReadyIssues() catch |err| {
+        std.debug.panic("ready1: {}", .{err});
+    };
+    defer sqlite.freeIssues(allocator, ready1);
+    try std.testing.expectEqual(@as(usize, 1), ready1.len); // Only blocker is ready
+
+    // Delete blocker
+    storage.deleteIssue("blocker") catch |err| {
+        std.debug.panic("delete: {}", .{err});
+    };
+
+    // Verify dependent is now ready (unblocked)
+    const ready2 = storage.getReadyIssues() catch |err| {
+        std.debug.panic("ready2: {}", .{err});
+    };
+    defer sqlite.freeIssues(allocator, ready2);
+    try std.testing.expectEqual(@as(usize, 1), ready2.len);
+    try std.testing.expectEqualStrings("dependent", ready2[0].id);
+}
+
 test "prop: invalid dependency rejected" {
     const DepCase = struct {
         raw: [8]u8,
