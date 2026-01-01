@@ -1729,6 +1729,150 @@ test "prop: hook sync matches oracle" {
     }.property, .{ .iterations = 20, .seed = 0xBEEFC0DE });
 }
 
+test "prop: hook sync status transitions match oracle" {
+    const TransitionCase = struct {
+        seed: u64,
+        initial_status: bool, // true = in_progress, false = pending
+    };
+
+    try qc.check(struct {
+        fn property(args: TransitionCase) bool {
+            var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+            defer arena.deinit();
+            const allocator = arena.allocator();
+
+            const test_dir = setupTestDirOrPanic(allocator);
+            defer cleanupTestDirAndFree(allocator, test_dir);
+
+            const initial_status: []const u8 = if (args.initial_status) "in_progress" else "pending";
+            const expected_db_status: Status = if (args.initial_status) .active else .open;
+
+            // Create initial todo
+            const todos1 = [_]HookTodo{.{
+                .content = "transition test",
+                .status = initial_status,
+                .activeForm = "Testing transitions",
+            }};
+
+            const input1 = buildTodoWriteJson(allocator, &todos1);
+            const hook1 = runDotWithInput(allocator, &.{ "hook", "sync" }, test_dir, input1) catch |err| {
+                std.debug.panic("hook sync 1: {}", .{err});
+            };
+            defer allocator.free(hook1.stdout);
+            defer allocator.free(hook1.stderr);
+            if (!isExitCode(hook1.term, 0)) return false;
+
+            // Verify initial status
+            const list1 = runDot(allocator, &.{ "ls", "--json" }, test_dir) catch |err| {
+                std.debug.panic("list 1: {}", .{err});
+            };
+            defer allocator.free(list1.stdout);
+            defer allocator.free(list1.stderr);
+
+            const parsed1 = std.json.parseFromSlice([]JsonIssue, allocator, list1.stdout, .{}) catch |err| {
+                std.debug.panic("parse 1: {}", .{err});
+            };
+            defer parsed1.deinit();
+            if (parsed1.value.len != 1) return false;
+            const status1 = parseStatusDisplay(parsed1.value[0].status) orelse return false;
+            if (status1 != expected_db_status) return false;
+
+            // Transition to opposite status
+            const new_status: []const u8 = if (args.initial_status) "pending" else "in_progress";
+            const expected_new_db_status: Status = if (args.initial_status) .open else .active;
+
+            const todos2 = [_]HookTodo{.{
+                .content = "transition test",
+                .status = new_status,
+                .activeForm = "Testing transitions",
+            }};
+
+            const input2 = buildTodoWriteJson(allocator, &todos2);
+            const hook2 = runDotWithInput(allocator, &.{ "hook", "sync" }, test_dir, input2) catch |err| {
+                std.debug.panic("hook sync 2: {}", .{err});
+            };
+            defer allocator.free(hook2.stdout);
+            defer allocator.free(hook2.stderr);
+            if (!isExitCode(hook2.term, 0)) return false;
+
+            // Verify status changed
+            const list2 = runDot(allocator, &.{ "ls", "--json" }, test_dir) catch |err| {
+                std.debug.panic("list 2: {}", .{err});
+            };
+            defer allocator.free(list2.stdout);
+            defer allocator.free(list2.stderr);
+
+            const parsed2 = std.json.parseFromSlice([]JsonIssue, allocator, list2.stdout, .{}) catch |err| {
+                std.debug.panic("parse 2: {}", .{err});
+            };
+            defer parsed2.deinit();
+            if (parsed2.value.len != 1) return false;
+            const status2 = parseStatusDisplay(parsed2.value[0].status) orelse return false;
+            if (status2 != expected_new_db_status) return false;
+
+            // Should still be only 1 issue (no duplicates)
+            return true;
+        }
+    }.property, .{ .iterations = 20, .seed = 0x7A551F });
+}
+
+test "prop: hook sync idempotent for same content" {
+    const IdempotentCase = struct {
+        seed: u64,
+        sync_count: u8,
+    };
+
+    try qc.check(struct {
+        fn property(args: IdempotentCase) bool {
+            var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+            defer arena.deinit();
+            const allocator = arena.allocator();
+
+            const test_dir = setupTestDirOrPanic(allocator);
+            defer cleanupTestDirAndFree(allocator, test_dir);
+
+            const todos = [_]HookTodo{.{
+                .content = "idempotent test",
+                .status = "pending",
+                .activeForm = "Testing idempotency",
+            }};
+
+            const input = buildTodoWriteJson(allocator, &todos);
+            const sync_count: usize = @as(usize, args.sync_count % 5) + 2;
+
+            // Sync multiple times with same content
+            for (0..sync_count) |_| {
+                const hook = runDotWithInput(allocator, &.{ "hook", "sync" }, test_dir, input) catch |err| {
+                    std.debug.panic("hook sync: {}", .{err});
+                };
+                defer allocator.free(hook.stdout);
+                defer allocator.free(hook.stderr);
+                if (!isExitCode(hook.term, 0)) return false;
+            }
+
+            // Should still have exactly 1 issue
+            const list = runDot(allocator, &.{ "ls", "--json" }, test_dir) catch |err| {
+                std.debug.panic("list: {}", .{err});
+            };
+            defer allocator.free(list.stdout);
+            defer allocator.free(list.stderr);
+
+            const parsed = std.json.parseFromSlice([]JsonIssue, allocator, list.stdout, .{}) catch |err| {
+                std.debug.panic("parse: {}", .{err});
+            };
+            defer parsed.deinit();
+            if (parsed.value.len != 1) return false;
+
+            // Mapping should have exactly 1 entry
+            var mapping = loadMappingFile(allocator, test_dir);
+            defer mapping_util.deinit(allocator, &mapping);
+            if (mapping.map.count() != 1) return false;
+
+            return true;
+        }
+    }.property, .{ .iterations = 20, .seed = 0x1DE4707 });
+}
+
 const JsonDependency = struct {
     depends_on_id: []const u8,
     type: []const u8,
