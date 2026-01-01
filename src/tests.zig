@@ -574,6 +574,60 @@ test "prop: unknown id errors" {
     }.property, .{ .iterations = 20, .seed = 0xBAD1D });
 }
 
+test "prop: invalid dependency rejected" {
+    const DepCase = struct {
+        raw: [8]u8,
+        use_parent: bool,
+    };
+
+    try qc.check(struct {
+        fn property(args: DepCase) bool {
+            const allocator = std.testing.allocator;
+
+            const test_dir = setupTestDirOrPanic(allocator);
+            defer cleanupTestDirAndFree(allocator, test_dir);
+
+            _ = runDot(allocator, &.{"init"}, test_dir) catch |err| {
+                std.debug.panic("init: {}", .{err});
+            };
+
+            // Generate random non-existent ID
+            var id_buf: [8]u8 = undefined;
+            for (args.raw, 0..) |byte, i| {
+                id_buf[i] = @as(u8, 'a') + (byte % 26);
+            }
+            const fake_id = id_buf[0..];
+
+            // Try to create with invalid dependency
+            const flag: []const u8 = if (args.use_parent) "-P" else "-a";
+            const result = runDot(allocator, &.{ "add", "Test task", flag, fake_id }, test_dir) catch |err| {
+                std.debug.panic("add: {}", .{err});
+            };
+            defer allocator.free(result.stdout);
+            defer allocator.free(result.stderr);
+
+            // Should fail with appropriate error
+            if (!isExitCode(result.term, 1)) return false;
+            if (std.mem.indexOf(u8, result.stderr, "not found") == null) return false;
+
+            // No issue should be created
+            const list = runDot(allocator, &.{ "ls", "--json" }, test_dir) catch |err| {
+                std.debug.panic("ls: {}", .{err});
+            };
+            defer allocator.free(list.stdout);
+            defer allocator.free(list.stderr);
+
+            const parsed = std.json.parseFromSlice([]JsonIssue, allocator, list.stdout, .{}) catch |err| {
+                std.debug.panic("parse: {}", .{err});
+            };
+            defer parsed.deinit();
+
+            // Oracle: no issues should exist
+            return parsed.value.len == 0;
+        }
+    }.property, .{ .iterations = 20, .seed = 0xDEADBEEF });
+}
+
 const max_model_tasks = 8;
 const max_model_steps = 20;
 const max_hook_todos = 4;
