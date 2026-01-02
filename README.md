@@ -112,16 +112,16 @@ Output format (JSON):
 ### Start Working
 
 ```bash
-dot on <id>
+dot on <id> [id2 ...]
 ```
-Marks task as `active`. Use when you begin working on a task.
+Marks task(s) as `active`. Use when you begin working on tasks.
 
 ### Complete Task
 
 ```bash
-dot off <id> [-r "reason"]
+dot off <id> [id2 ...] [-r "reason"]
 ```
-Marks task as `done`. Optional reason is stored in task.
+Marks task(s) as `done`. Optional reason applies to all.
 
 ### Show Task Details
 
@@ -142,9 +142,9 @@ Created:  2024-12-24T10:30:00.000000+00:00
 ### Remove Task
 
 ```bash
-dot rm <id>
+dot rm <id> [id2 ...]
 ```
-Permanently deletes task from database.
+Permanently deletes task(s) from database.
 
 ### Show Ready Tasks
 

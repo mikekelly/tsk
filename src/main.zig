@@ -330,7 +330,7 @@ fn writeIssueList(issues: []const sqlite.Issue, skip_done: bool, use_json: bool)
 }
 
 fn cmdOn(allocator: Allocator, args: []const []const u8) !void {
-    if (args.len == 0) fatal("Usage: dot on <id>\n", .{});
+    if (args.len == 0) fatal("Usage: dot on <id> [id2 ...]\n", .{});
 
     var ts_buf: [40]u8 = undefined;
     const now = try formatTimestamp(&ts_buf);
@@ -338,20 +338,31 @@ fn cmdOn(allocator: Allocator, args: []const []const u8) !void {
     var storage = try openStorage(allocator);
     defer storage.close();
 
-    storage.updateStatus(args[0], "active", now, null, null) catch |err| switch (err) {
-        error.IssueNotFound => fatal("Issue not found: {s}\n", .{args[0]}),
-        else => return err,
-    };
+    for (args) |id| {
+        storage.updateStatus(id, "active", now, null, null) catch |err| switch (err) {
+            error.IssueNotFound => fatal("Issue not found: {s}\n", .{id}),
+            else => return err,
+        };
+    }
 }
 
 fn cmdOff(allocator: Allocator, args: []const []const u8) !void {
-    if (args.len == 0) fatal("Usage: dot off <id> [-r reason]\n", .{});
+    if (args.len == 0) fatal("Usage: dot off <id> [id2 ...] [-r reason]\n", .{});
 
     var reason: ?[]const u8 = null;
-    var i: usize = 1;
+    var ids: std.ArrayList([]const u8) = .{};
+    defer ids.deinit(allocator);
+
+    var i: usize = 0;
     while (i < args.len) : (i += 1) {
-        if (getArg(args, &i, "-r")) |v| reason = v;
+        if (getArg(args, &i, "-r")) |v| {
+            reason = v;
+        } else {
+            try ids.append(allocator, args[i]);
+        }
     }
+
+    if (ids.items.len == 0) fatal("Usage: dot off <id> [id2 ...] [-r reason]\n", .{});
 
     var ts_buf: [40]u8 = undefined;
     const now = try formatTimestamp(&ts_buf);
@@ -359,22 +370,26 @@ fn cmdOff(allocator: Allocator, args: []const []const u8) !void {
     var storage = try openStorage(allocator);
     defer storage.close();
 
-    storage.updateStatus(args[0], "closed", now, now, reason) catch |err| switch (err) {
-        error.IssueNotFound => fatal("Issue not found: {s}\n", .{args[0]}),
-        else => return err,
-    };
+    for (ids.items) |id| {
+        storage.updateStatus(id, "closed", now, now, reason) catch |err| switch (err) {
+            error.IssueNotFound => fatal("Issue not found: {s}\n", .{id}),
+            else => return err,
+        };
+    }
 }
 
 fn cmdRm(allocator: Allocator, args: []const []const u8) !void {
-    if (args.len == 0) fatal("Usage: dot rm <id>\n", .{});
+    if (args.len == 0) fatal("Usage: dot rm <id> [id2 ...]\n", .{});
 
     var storage = try openStorage(allocator);
     defer storage.close();
 
-    storage.deleteIssue(args[0]) catch |err| switch (err) {
-        error.IssueNotFound => fatal("Issue not found: {s}\n", .{args[0]}),
-        else => return err,
-    };
+    for (args) |id| {
+        storage.deleteIssue(id) catch |err| switch (err) {
+            error.IssueNotFound => fatal("Issue not found: {s}\n", .{id}),
+            else => return err,
+        };
+    }
 }
 
 fn cmdShow(allocator: Allocator, args: []const []const u8) !void {
