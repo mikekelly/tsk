@@ -24,7 +24,7 @@ pub const StorageError = error{
     IoError,
 };
 
-/// Validates that an ID is safe for use in paths (no path traversal, no control chars)
+/// Validates that an ID is safe for use in paths and YAML
 pub fn validateId(id: []const u8) StorageError!void {
     if (id.len == 0) return StorageError.InvalidId;
     if (id.len > 128) return StorageError.InvalidId;
@@ -33,9 +33,10 @@ pub fn validateId(id: []const u8) StorageError!void {
     if (std.mem.indexOf(u8, id, "\\") != null) return StorageError.InvalidId;
     if (std.mem.indexOf(u8, id, "..") != null) return StorageError.InvalidId;
     if (std.mem.eql(u8, id, ".")) return StorageError.InvalidId;
-    // Reject control characters (including null, newlines, tabs)
+    // Reject control characters and YAML-sensitive characters
     for (id) |c| {
         if (c < 0x20 or c == 0x7F) return StorageError.InvalidId;
+        if (c == '#' or c == ':' or c == '\'' or c == '"') return StorageError.InvalidId;
     }
 }
 
@@ -1406,8 +1407,11 @@ pub const Storage = struct {
         // deleteTree succeeds silently if the directory doesn't exist
         try self.dots_dir.deleteTree("archive");
 
-        // Recreate empty archive directory
-        try self.dots_dir.makeDir("archive");
+        // Recreate empty archive directory (handle race if another process recreated it)
+        self.dots_dir.makeDir("archive") catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
+        };
     }
 
     // Config stored in .dots/config as simple key=value lines
