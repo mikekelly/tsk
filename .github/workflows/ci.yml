@@ -17,28 +17,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install SQLite (Ubuntu)
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev
-
-      - name: Install SQLite (macOS)
-        if: runner.os == 'macOS'
-        run: brew install sqlite
-
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
         with:
           version: 0.15.2
 
       - name: Build
-        run: zig build -Dsystem-sqlite=true
+        run: zig build
 
       - name: Test
-        run: zig build test -Dsystem-sqlite=true
+        run: zig build test
 
       - name: Build Release
         run: |
-          zig build -Doptimize=ReleaseSmall -Dsystem-sqlite=true
+          zig build -Doptimize=ReleaseSmall
           strip zig-out/bin/dot || true
 
       - name: Verify binary

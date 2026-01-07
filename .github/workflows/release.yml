@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag (e.g., v0.2.0)'
+        description: 'Release tag (e.g., v0.5.0)'
         required: true
 
 jobs:
@@ -26,20 +26,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download SQLite amalgamation
-        run: |
-          curl -L -o sqlite.zip https://www.sqlite.org/2025/sqlite-amalgamation-3510100.zip
-          unzip sqlite.zip
-          mv sqlite-amalgamation-3510100 sqlite
-
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
         with:
           version: 0.15.2
 
-      - name: Build Release (static)
+      - name: Build Release
         run: |
-          zig build -Doptimize=ReleaseSmall -Dsqlite-source=sqlite/sqlite3.c
+          zig build -Doptimize=ReleaseSmall
           strip zig-out/bin/dot || true
           mv zig-out/bin/dot ${{ matrix.artifact }}
 
@@ -99,11 +93,19 @@ jobs:
             release/dot-linux-x86_64
             release/dot-macos-arm64
           body: |
+            ## What's New
+
+            Major rewrite: SQLite replaced with plain markdown files.
+            - **107x smaller binary** (25MB → 233KB)
+            - **41x less code** (115k → 2.8k LOC)
+            - **Zero dependencies** - no database, no runtime requirements
+            - **Portable storage** - copy `.dots/` folder anywhere
+
             ## Installation
 
             ### Homebrew (macOS ARM64, Linux x86_64)
             ```bash
-            brew install joelreymont/tap/dot
+            brew install joelreymont/tap/dots
             ```
 
             ### Manual download
@@ -117,6 +119,13 @@ jobs:
             curl -L -o dot https://github.com/${{ github.repository }}/releases/download/${{ steps.tag.outputs.tag }}/dot-macos-arm64
             chmod +x dot
             sudo mv dot /usr/local/bin/
+            ```
+
+            ## Migrating from beads
+
+            If you have existing tasks in `.beads/beads.db`:
+            ```bash
+            ./migrate-dots.sh
             ```
 
             ## Verify
@@ -141,9 +150,9 @@ jobs:
           MACOS_SHA="${{ needs.release.outputs.macos_sha256 }}"
           LINUX_SHA="${{ needs.release.outputs.linux_sha256 }}"
 
-          cat > Formula/dot.rb << 'FORMULA'
-          class Dot < Formula
-            desc "Minimal task tracker for AI agents - like beads, but smaller and faster"
+          cat > Formula/dots.rb << 'FORMULA'
+          class Dots < Formula
+            desc "Minimal task tracker for AI agents - plain markdown files, no database"
             homepage "https://github.com/joelreymont/dots"
             version "VERSION_PLACEHOLDER"
             license "MIT"
@@ -180,15 +189,15 @@ jobs:
           end
           FORMULA
 
-          sed -i "s/VERSION_PLACEHOLDER/$VERSION/g" Formula/dot.rb
-          sed -i "s/TAG_PLACEHOLDER/$TAG/g" Formula/dot.rb
-          sed -i "s/MACOS_SHA_PLACEHOLDER/$MACOS_SHA/g" Formula/dot.rb
-          sed -i "s/LINUX_SHA_PLACEHOLDER/$LINUX_SHA/g" Formula/dot.rb
+          sed -i "s/VERSION_PLACEHOLDER/$VERSION/g" Formula/dots.rb
+          sed -i "s/TAG_PLACEHOLDER/$TAG/g" Formula/dots.rb
+          sed -i "s/MACOS_SHA_PLACEHOLDER/$MACOS_SHA/g" Formula/dots.rb
+          sed -i "s/LINUX_SHA_PLACEHOLDER/$LINUX_SHA/g" Formula/dots.rb
 
       - name: Commit and push
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Formula/dot.rb
-          git commit -m "Update dot to ${{ needs.release.outputs.tag }}"
+          git add Formula/dots.rb
+          git commit -m "Update dots to ${{ needs.release.outputs.tag }}"
           git push
