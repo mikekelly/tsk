@@ -41,6 +41,7 @@ const commands = [_]Command{
     .{ .names = &.{"update"}, .handler = cmdUpdate },
     .{ .names = &.{"close"}, .handler = cmdClose },
     .{ .names = &.{"purge"}, .handler = cmdPurge },
+    .{ .names = &.{"slugify"}, .handler = cmdSlugify },
     .{ .names = &.{"hook"}, .handler = cmdHook },
     .{ .names = &.{"init"}, .handler = cmdInitWrapper },
     .{ .names = &.{ "help", "--help", "-h" }, .handler = cmdHelp },
@@ -212,21 +213,7 @@ const USAGE =
     \\
 ;
 
-fn cmdInit(allocator: Allocator, args: []const []const u8) !void {
-    var storage = try openStorage(allocator);
-    defer storage.close();
-
-    // Handle --from-jsonl flag for migration
-    var i: usize = 0;
-    while (i < args.len) : (i += 1) {
-        if (getArg(args, &i, "--from-jsonl")) |jsonl_path| {
-            const result = try hydrateFromJsonl(allocator, &storage, jsonl_path);
-            if (result.imported > 0) try stdout().print("Imported {d} issues from {s}\n", .{ result.imported, jsonl_path });
-            if (result.skipped > 0) try stderr().print("Warning: skipped {d} issues due to errors\n", .{result.skipped});
-            if (result.dep_skipped > 0) try stderr().print("Warning: skipped {d} dependencies due to errors\n", .{result.dep_skipped});
-        }
-    }
-
+fn gitAddDots(allocator: Allocator) !void {
     // Add .dots to git if in a git repo
     fs.cwd().access(".git", .{}) catch |err| switch (err) {
         error.FileNotFound => return,
@@ -245,6 +232,24 @@ fn cmdInit(allocator: Allocator, args: []const []const u8) !void {
         .Signal => |sig| try stderr().print("Warning: git add killed by signal {d}\n", .{sig}),
         else => try stderr().writeAll("Warning: git add terminated abnormally\n"),
     }
+}
+
+fn cmdInit(allocator: Allocator, args: []const []const u8) !void {
+    var storage = try openStorage(allocator);
+    defer storage.close();
+
+    // Handle --from-jsonl flag for migration
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        if (getArg(args, &i, "--from-jsonl")) |jsonl_path| {
+            const result = try hydrateFromJsonl(allocator, &storage, jsonl_path);
+            if (result.imported > 0) try stdout().print("Imported {d} issues from {s}\n", .{ result.imported, jsonl_path });
+            if (result.skipped > 0) try stderr().print("Warning: skipped {d} issues due to errors\n", .{result.skipped});
+            if (result.dep_skipped > 0) try stderr().print("Warning: skipped {d} dependencies due to errors\n", .{result.dep_skipped});
+        }
+    }
+
+    try gitAddDots(allocator);
 }
 
 fn cmdAdd(allocator: Allocator, args: []const []const u8) !void {
@@ -283,7 +288,7 @@ fn cmdAdd(allocator: Allocator, args: []const []const u8) !void {
     const prefix = try storage_mod.getOrCreatePrefix(allocator, &storage);
     defer allocator.free(prefix);
 
-    const id = try storage_mod.generateId(allocator, prefix);
+    const id = try storage_mod.generateIdWithTitle(allocator, prefix, title);
     defer allocator.free(id);
 
     var ts_buf: [40]u8 = undefined;
@@ -585,6 +590,80 @@ fn cmdPurge(allocator: Allocator, _: []const []const u8) !void {
     try stdout().writeAll("Archive purged\n");
 }
 
+fn cmdSlugify(allocator: Allocator, _: []const []const u8) !void {
+    var storage = try openStorage(allocator);
+    defer storage.close();
+
+    const prefix = try storage_mod.getOrCreatePrefix(allocator, &storage);
+    defer allocator.free(prefix);
+
+    // Slugify all issues (including archived)
+    const issues = try storage.listAllIssuesIncludingArchived();
+    defer storage_mod.freeIssues(allocator, issues);
+
+    var count: usize = 0;
+    for (issues) |issue| {
+        const renamed = try slugifyIssue(allocator, &storage, prefix, issue.id, issue.title);
+        if (renamed) {
+            count += 1;
+        }
+    }
+
+    try stdout().print("Slugified {d} issue(s)\n", .{count});
+    try gitAddDots(allocator);
+}
+
+fn slugifyIssue(allocator: Allocator, storage: *Storage, prefix: []const u8, old_id: []const u8, title: []const u8) !bool {
+    // Generate new slugified ID
+    const slug = try storage_mod.slugify(allocator, title);
+    defer allocator.free(slug);
+
+    // Extract hex suffix from old ID (last 8 chars after last hyphen)
+    var hex_suffix: []const u8 = "";
+    if (std.mem.lastIndexOf(u8, old_id, "-")) |last_hyphen| {
+        const suffix = old_id[last_hyphen + 1 ..];
+        if (suffix.len == 8) {
+            // Validate it's hex
+            var is_hex = true;
+            for (suffix) |c| {
+                if (!std.ascii.isHex(c)) {
+                    is_hex = false;
+                    break;
+                }
+            }
+            if (is_hex) hex_suffix = suffix;
+        }
+    }
+
+    // If no valid hex suffix, generate new one
+    var hex_buf: [8]u8 = undefined;
+    if (hex_suffix.len == 0) {
+        var rand_bytes: [4]u8 = undefined;
+        std.crypto.random.bytes(&rand_bytes);
+        const hex = std.fmt.bytesToHex(rand_bytes, .lower);
+        @memcpy(&hex_buf, &hex);
+        hex_suffix = &hex_buf;
+    }
+
+    const new_id = try std.fmt.allocPrint(allocator, "{s}-{s}-{s}", .{ prefix, slug, hex_suffix });
+    defer allocator.free(new_id);
+
+    // Skip if already slugified (same ID)
+    if (std.mem.eql(u8, old_id, new_id)) {
+        return false;
+    }
+
+    // Check if new ID already exists (collision)
+    if (storage.issueExists(new_id)) {
+        try stderr().print("Skipping {s}: new ID {s} already exists\n", .{ old_id, new_id });
+        return false;
+    }
+
+    try storage.renameIssue(old_id, new_id);
+    try stdout().print("{s} -> {s}\n", .{ old_id, new_id });
+    return true;
+}
+
 fn formatTimestamp(buf: []u8) ![]const u8 {
     const nanos = std.time.nanoTimestamp();
     if (nanos < 0) return error.InvalidTimestamp;
@@ -836,7 +915,7 @@ fn hookSync(allocator: Allocator) !void {
             try storage.updateStatus(dot_id, new_status, null, null);
         } else {
             // Create new dot
-            const id = try storage_mod.generateId(allocator, prefix);
+            const id = try storage_mod.generateIdWithTitle(allocator, prefix, content);
             defer allocator.free(id);
             const desc = todo.activeForm orelse "";
             const is_in_progress = std.mem.eql(u8, status, "in_progress");
