@@ -151,6 +151,91 @@ fn runDotWithInput(
     return RunResult{ .stdout = stdout, .stderr = stderr, .term = term };
 }
 
+/// Multi-process test harness for concurrent operations
+const MultiProcess = struct {
+    const MAX_PROCS = 8;
+    const MAX_ARGS = 8;
+
+    allocator: std.mem.Allocator,
+    cwd: []const u8,
+    children: [MAX_PROCS]std.process.Child = undefined,
+    argv_storage: [MAX_PROCS][MAX_ARGS][]const u8 = undefined,
+    argv_lens: [MAX_PROCS]usize = [_]usize{0} ** MAX_PROCS,
+    inputs: [MAX_PROCS]?[]const u8 = [_]?[]const u8{null} ** MAX_PROCS,
+    count: usize = 0,
+
+    fn init(allocator: std.mem.Allocator, cwd: []const u8) MultiProcess {
+        return .{ .allocator = allocator, .cwd = cwd };
+    }
+
+    /// Add a process to spawn with given args and optional stdin
+    fn add(self: *MultiProcess, args: []const []const u8, input: ?[]const u8) !void {
+        if (self.count >= MAX_PROCS) return error.TooManyProcesses;
+        if (args.len + 1 > MAX_ARGS) return error.TooManyArgs;
+
+        // Store args in fixed storage
+        self.argv_storage[self.count][0] = dot_binary;
+        for (args, 0..) |arg, i| {
+            self.argv_storage[self.count][i + 1] = arg;
+        }
+        self.argv_lens[self.count] = args.len + 1;
+        self.inputs[self.count] = input;
+        self.count += 1;
+    }
+
+    /// Spawn all processes concurrently
+    fn spawnAll(self: *MultiProcess) !void {
+        for (0..self.count) |i| {
+            const argv = self.argv_storage[i][0..self.argv_lens[i]];
+            self.children[i] = std.process.Child.init(argv, self.allocator);
+            self.children[i].cwd = self.cwd;
+            self.children[i].stdin_behavior = if (self.inputs[i] != null) .Pipe else .Ignore;
+            self.children[i].stdout_behavior = .Pipe;
+            self.children[i].stderr_behavior = .Pipe;
+
+            try self.children[i].spawn();
+            if (self.inputs[i]) |data| {
+                try self.children[i].stdin.?.writeAll(data);
+                self.children[i].stdin.?.close();
+                self.children[i].stdin = null;
+            }
+        }
+    }
+
+    /// Wait for all processes and return results
+    fn waitAll(self: *MultiProcess) ![MAX_PROCS]?RunResult {
+        var results: [MAX_PROCS]?RunResult = [_]?RunResult{null} ** MAX_PROCS;
+        for (0..self.count) |i| {
+            const stdout = try self.children[i].stdout.?.readToEndAlloc(self.allocator, max_output_bytes);
+            const stderr = try self.children[i].stderr.?.readToEndAlloc(self.allocator, max_output_bytes);
+            const term = try self.children[i].wait();
+            results[i] = .{ .stdout = stdout, .stderr = stderr, .term = term };
+        }
+        return results;
+    }
+
+    /// Check if all processes succeeded (exit code 0)
+    fn allSucceeded(results: [MAX_PROCS]?RunResult, count: usize) bool {
+        for (0..count) |i| {
+            if (results[i]) |r| {
+                if (!isExitCode(r.term, 0)) return false;
+            }
+        }
+        return true;
+    }
+
+    /// Free all result memory
+    fn freeResults(self: *MultiProcess, results: *[MAX_PROCS]?RunResult) void {
+        for (0..self.count) |i| {
+            if (results[i]) |r| {
+                self.allocator.free(r.stdout);
+                self.allocator.free(r.stderr);
+                results[i] = null;
+            }
+        }
+    }
+};
+
 fn setupTestDir(allocator: std.mem.Allocator) ![]const u8 {
     var rand_buf: [8]u8 = undefined;
     std.crypto.random.bytes(&rand_buf);
@@ -2152,43 +2237,23 @@ test "cli: concurrent hook sync uses locking" {
         std.debug.panic("init: {}", .{err});
     };
 
-    // Spawn multiple concurrent sync processes with different todos
-    const num_procs = 4;
-    var children: [num_procs]std.process.Child = undefined;
+    // Use MultiProcess harness to spawn concurrent sync processes
+    var mp = MultiProcess.init(allocator, test_dir);
 
-    for (0..num_procs) |i| {
-        var input_buf: [256]u8 = undefined;
-        const input = std.fmt.bufPrint(&input_buf, "{{\"tool_name\":\"TodoWrite\",\"tool_input\":{{\"todos\":[{{\"content\":\"task-{d}\",\"status\":\"pending\"}}]}}}}", .{i}) catch unreachable;
-
-        var argv: std.ArrayList([]const u8) = .{};
-        defer argv.deinit(allocator);
-        try argv.append(allocator, dot_binary);
-        try argv.append(allocator, "hook");
-        try argv.append(allocator, "sync");
-
-        children[i] = std.process.Child.init(argv.items, allocator);
-        children[i].cwd = test_dir;
-        children[i].stdin_behavior = .Pipe;
-        children[i].stdout_behavior = .Pipe;
-        children[i].stderr_behavior = .Pipe;
-
-        try children[i].spawn();
-        try children[i].stdin.?.writeAll(input);
-        children[i].stdin.?.close();
-        children[i].stdin = null;
+    // Pre-allocate input buffers (must outlive spawnAll)
+    var input_bufs: [4][256]u8 = undefined;
+    var inputs: [4][]const u8 = undefined;
+    for (0..4) |i| {
+        inputs[i] = std.fmt.bufPrint(&input_bufs[i], "{{\"tool_name\":\"TodoWrite\",\"tool_input\":{{\"todos\":[{{\"content\":\"task-{d}\",\"status\":\"pending\"}}]}}}}", .{i}) catch unreachable;
+        try mp.add(&.{ "hook", "sync" }, inputs[i]);
     }
 
-    // Wait for all processes
-    var all_succeeded = true;
-    for (0..num_procs) |i| {
-        _ = try children[i].stdout.?.readToEndAlloc(allocator, max_output_bytes);
-        _ = try children[i].stderr.?.readToEndAlloc(allocator, max_output_bytes);
-        const term = try children[i].wait();
-        if (!isExitCode(term, 0)) all_succeeded = false;
-    }
+    try mp.spawnAll();
+    var results = try mp.waitAll();
+    defer mp.freeResults(&results);
 
     // All should succeed (some may skip due to lock contention, but none should fail)
-    try std.testing.expect(all_succeeded);
+    try std.testing.expect(MultiProcess.allSucceeded(results, mp.count));
 
     // Verify mapping file is valid JSON (not corrupted)
     const mapping_path = std.fmt.allocPrint(allocator, "{s}/.dots/todo-mapping.json", .{test_dir}) catch unreachable;

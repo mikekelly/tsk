@@ -76,6 +76,9 @@ pub fn main() !void {
     if (stdout_writer) |*writer| {
         try writer.interface.flush();
     }
+    if (stderr_writer) |*writer| {
+        try writer.interface.flush();
+    }
 }
 
 fn cmdInitWrapper(allocator: Allocator, args: []const []const u8) !void {
@@ -97,6 +100,8 @@ fn openStorage(allocator: Allocator) !Storage {
 // I/O helpers
 var stdout_buffer: [4096]u8 = undefined;
 var stdout_writer: ?fs.File.Writer = null;
+var stderr_buffer: [4096]u8 = undefined;
+var stderr_writer: ?fs.File.Writer = null;
 
 fn stdout() *std.Io.Writer {
     if (stdout_writer == null) {
@@ -105,8 +110,17 @@ fn stdout() *std.Io.Writer {
     return &stdout_writer.?.interface;
 }
 
+fn stderr() *std.Io.Writer {
+    if (stderr_writer == null) {
+        stderr_writer = fs.File.stderr().writer(&stderr_buffer);
+    }
+    return &stderr_writer.?.interface;
+}
+
 fn fatal(comptime fmt: []const u8, args: anytype) noreturn {
-    std.debug.print(fmt, args);
+    const w = stderr();
+    w.print(fmt, args) catch {};
+    w.flush() catch {};
     std.process.exit(1);
 }
 
@@ -776,7 +790,10 @@ fn hookSync(allocator: Allocator) !void {
 
         if (std.mem.eql(u8, status, "completed")) {
             // Mark as done if we have mapping
-            const dot_id = mapping.map.get(content) orelse return error.MissingTodoMapping;
+            const dot_id = mapping.map.get(content) orelse {
+                stderr().print("MissingTodoMapping: {s}\n", .{content}) catch {};
+                return error.MissingTodoMapping;
+            };
             try storage.updateStatus(dot_id, .closed, now, "Completed via TodoWrite");
             if (mapping.map.fetchOrderedRemove(content)) |kv| {
                 allocator.free(kv.key);
