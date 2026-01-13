@@ -29,7 +29,6 @@ zig build test
 - See `docs/zig-0.15-api.md` for API reference
 - ArrayList is unmanaged: `var list = std.ArrayList(T){};` + pass allocator to methods
 - Alignment enum: `alignedAlloc(u8, .@"16", size)`
-- I/O: `std.fs.File.stdout()` not `std.io.getStdOut()`
 
 ### Import Once, Reference via Namespace
 ```zig
@@ -64,47 +63,6 @@ try list.append(allocator, c);
 const items = [_]T{ a, b, c };
 try list.appendSlice(allocator, &items);
 ```
-
-### Error Handling - NEVER MASK ERRORS (BLOCKING REQUIREMENT)
-
-ALL error-masking patterns are FORBIDDEN:
-
-```zig
-// FORBIDDEN - All of these mask errors:
-foo() catch unreachable;           // Crashes instead of propagating
-foo() catch return;                // Silently drops error, returns void
-foo() catch return null;           // Converts error to null
-foo() catch |_| return;            // Same as above, discards error info
-foo() orelse unreachable;          // Crashes on null
-foo() orelse return error.Foo;     // Replaces actual error with generic one
-foo() catch blk: { break :blk default; };  // Swallows error, uses default
-```
-
-The ONLY correct pattern is `try`:
-
-```zig
-// RIGHT - Always propagate errors
-const result = try foo();
-```
-
-Functions that call fallible operations MUST return error unions:
-
-```zig
-// WRONG - Can't use try, forces error masking
-pub fn process(heap: *Heap) void { ... }
-fn simplify(self: *Self) void { ... }
-
-// RIGHT - Allows proper error propagation
-pub fn process(heap: *Heap) !void { ... }
-fn simplify(self: *Self) !void { ... }
-```
-
-If a function currently returns `void` but needs to call fallible operations, change it to return `!void`. Never work around this by masking errors.
-
-The only acceptable use of `unreachable`:
-- Switch cases that are logically impossible (e.g., exhaustive enum after filtering)
-- Array indices proven in-bounds by prior checks
-- Never for "this shouldn't fail" - if it can fail, propagate the error
 
 ### Avoid Allocation When Possible
 - Use stack arrays for small fixed-size data

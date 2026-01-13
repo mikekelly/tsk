@@ -672,10 +672,11 @@ const abbrev_map = std.StaticStringMap([]const u8).initComptime(.{
     .{ "components", "comps" },
 });
 
-const MAX_SLUG_LEN: usize = 32;
+const MAX_SLUG_LEN: usize = 30;
+const MAX_SLUG_WORDS: usize = 3;
 
-/// Convert title to URL-safe slug with abbreviations
-/// Example: "Fix User Authentication Bug" -> "fix-user-auth-bug"
+/// Convert title to URL-safe slug (max 3 words, 30 chars)
+/// Example: "Fix User Authentication Bug" -> "fix-user-auth"
 pub fn slugify(allocator: Allocator, title: []const u8) ![]u8 {
     if (title.len == 0) {
         return allocator.dupe(u8, "untitled");
@@ -686,6 +687,7 @@ pub fn slugify(allocator: Allocator, title: []const u8) ![]u8 {
 
     var word_start: usize = 0;
     var in_word = false;
+    var word_count: usize = 0;
 
     for (title, 0..) |c, i| {
         const is_alnum = std.ascii.isAlphanumeric(c);
@@ -696,13 +698,14 @@ pub fn slugify(allocator: Allocator, title: []const u8) ![]u8 {
         } else if (!is_alnum and in_word) {
             // End of word - process it
             try appendWord(allocator, &result, title[word_start..i]);
+            word_count += 1;
             in_word = false;
-            if (result.items.len >= MAX_SLUG_LEN) break;
+            if (result.items.len >= MAX_SLUG_LEN or word_count >= MAX_SLUG_WORDS) break;
         }
     }
 
     // Handle last word
-    if (in_word and result.items.len < MAX_SLUG_LEN) {
+    if (in_word and result.items.len < MAX_SLUG_LEN and word_count < MAX_SLUG_WORDS) {
         try appendWord(allocator, &result, title[word_start..]);
     }
 

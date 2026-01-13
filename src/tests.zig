@@ -6,11 +6,9 @@ const dot_binary = build_options.dot_binary;
 
 const storage_mod = @import("storage.zig");
 const zc = @import("zcheck");
-const mapping_util = @import("util/mapping.zig");
 const OhSnap = @import("ohsnap");
 
 const max_output_bytes = 1024 * 1024;
-const max_mapping_bytes = 1024 * 1024;
 const fixed_timestamp = "2024-01-01T00:00:00.000000+00:00";
 
 const RunResult = struct {
@@ -314,56 +312,6 @@ fn openTestStorage(allocator: std.mem.Allocator, dir: []const u8) TestStorage {
 
 fn trimNewline(input: []const u8) []const u8 {
     return std.mem.trimRight(u8, input, "\n");
-}
-
-fn writeMappingFile(allocator: std.mem.Allocator, test_dir: []const u8, map: mapping_util.Mapping) !void {
-    const path = try std.fmt.allocPrint(allocator, "{s}/.dots/todo-mapping.json", .{test_dir});
-    defer allocator.free(path);
-
-    const file = try fs.createFileAbsolute(path, .{});
-    defer file.close();
-
-    var buffer: [4096]u8 = undefined;
-    var writer = file.writer(&buffer);
-    const w = &writer.interface;
-    try std.json.Stringify.value(map, .{}, w);
-    try w.flush();
-    try file.sync();
-}
-
-fn readMappingFile(allocator: std.mem.Allocator, test_dir: []const u8) !mapping_util.Mapping {
-    const path = try std.fmt.allocPrint(allocator, "{s}/.dots/todo-mapping.json", .{test_dir});
-    defer allocator.free(path);
-
-    const file = try fs.openFileAbsolute(path, .{});
-    defer file.close();
-
-    const content = try file.readToEndAlloc(allocator, max_mapping_bytes);
-    defer allocator.free(content);
-
-    const parsed = try std.json.parseFromSlice(mapping_util.Mapping, allocator, content, .{
-        .ignore_unknown_fields = false,
-    });
-    defer parsed.deinit();
-
-    var map: mapping_util.Mapping = .{};
-    errdefer mapping_util.deinit(allocator, &map);
-
-    var it = parsed.value.map.iterator();
-    while (it.next()) |entry| {
-        const key = try allocator.dupe(u8, entry.key_ptr.*);
-        const val = allocator.dupe(u8, entry.value_ptr.*) catch |err| {
-            allocator.free(key);
-            return err;
-        };
-        map.map.put(allocator, key, val) catch |err| {
-            allocator.free(key);
-            allocator.free(val);
-            return err;
-        };
-    }
-
-    return map;
 }
 
 fn isExitCode(term: std.process.Child.Term, code: u8) bool {
@@ -841,6 +789,21 @@ const JsonIssue = struct {
     priority: i64,
 };
 
+test "cli: hook command is rejected" {
+    const allocator = std.testing.allocator;
+
+    const test_dir = setupTestDirOrPanic(allocator);
+    defer cleanupTestDirAndFree(allocator, test_dir);
+
+    _ = runDot(allocator, &.{"init"}, test_dir) catch unreachable;
+
+    const result = runDot(allocator, &.{"hook"}, test_dir) catch unreachable;
+    defer result.deinit(allocator);
+
+    try std.testing.expect(!isExitCode(result.term, 0));
+    try std.testing.expect(std.mem.indexOf(u8, result.stderr, "Unknown command: hook") != null);
+}
+
 test "cli: init creates dots directory" {
     const allocator = std.testing.allocator;
 
@@ -1045,187 +1008,6 @@ test "cli: find matches titles case-insensitively" {
         }
     }
     try std.testing.expectEqual(@as(usize, 2), matches);
-}
-
-test "cli: hook session prints active and ready" {
-    const allocator = std.testing.allocator;
-
-    const test_dir = setupTestDirOrPanic(allocator);
-    defer cleanupTestDirAndFree(allocator, test_dir);
-
-    const init = runDot(allocator, &.{"init"}, test_dir) catch |err| {
-        std.debug.panic("init: {}", .{err});
-    };
-    defer init.deinit(allocator);
-
-    const active_add = runDot(allocator, &.{ "add", "Active task" }, test_dir) catch |err| {
-        std.debug.panic("add active: {}", .{err});
-    };
-    defer active_add.deinit(allocator);
-    const active_id = trimNewline(active_add.stdout);
-
-    const ready_add = runDot(allocator, &.{ "add", "Ready task" }, test_dir) catch |err| {
-        std.debug.panic("add ready: {}", .{err});
-    };
-    defer ready_add.deinit(allocator);
-
-    const on = runDot(allocator, &.{ "on", active_id }, test_dir) catch |err| {
-        std.debug.panic("on: {}", .{err});
-    };
-    defer on.deinit(allocator);
-
-    const result = runDot(allocator, &.{ "hook", "session" }, test_dir) catch |err| {
-        std.debug.panic("hook session: {}", .{err});
-    };
-    defer result.deinit(allocator);
-
-    try std.testing.expect(isExitCode(result.term, 0));
-    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "--- DOTS ---") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "ACTIVE:") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "READY:") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "Active task") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "Ready task") != null);
-}
-
-test "prop: hook sync updates mapping and statuses" {
-    const HookCase = struct {
-        statuses: [4]u2,
-        existing: [4]bool,
-        active_form: [4]bool,
-    };
-
-    const HookTodo = struct {
-        content: []const u8,
-        status: []const u8,
-        activeForm: ?[]const u8 = null,
-    };
-
-    const HookTodoInput = struct {
-        todos: []const HookTodo,
-    };
-
-    const HookEnvelope = struct {
-        tool_name: []const u8,
-        tool_input: HookTodoInput,
-    };
-
-    try zc.check(struct {
-        fn property(args: HookCase) bool {
-            const allocator = std.testing.allocator;
-
-            const test_dir = setupTestDirOrPanic(allocator);
-            defer cleanupTestDirAndFree(allocator, test_dir);
-
-            var ts = openTestStorage(allocator, test_dir);
-
-            var mapping: mapping_util.Mapping = .{};
-            defer mapping_util.deinit(allocator, &mapping);
-
-            var content_bufs: [4][16]u8 = undefined;
-            var id_bufs: [4][16]u8 = undefined;
-            var form_bufs: [4][20]u8 = undefined;
-            var contents: [4][]const u8 = undefined;
-            var ids: [4]?[]const u8 = [_]?[]const u8{null} ** 4;
-            var statuses: [4][]const u8 = undefined;
-            var forms: [4]?[]const u8 = [_]?[]const u8{null} ** 4;
-
-            for (0..4) |i| {
-                contents[i] = std.fmt.bufPrint(&content_bufs[i], "todo-{d}", .{i}) catch return false;
-                const status_case = args.statuses[i] % 3;
-                statuses[i] = switch (status_case) {
-                    0 => "pending",
-                    1 => "in_progress",
-                    else => "completed",
-                };
-                if (args.active_form[i]) {
-                    forms[i] = std.fmt.bufPrint(&form_bufs[i], "detail-{d}", .{i}) catch return false;
-                }
-
-                const needs_mapping = args.existing[i] or status_case == 2;
-                if (needs_mapping) {
-                    const id = std.fmt.bufPrint(&id_bufs[i], "hook-{d}", .{i}) catch return false;
-                    ids[i] = id;
-                    const issue = makeTestIssue(id, .open);
-                    ts.storage.createIssue(issue, null) catch return false;
-
-                    const key = allocator.dupe(u8, contents[i]) catch return false;
-                    const val = allocator.dupe(u8, id) catch {
-                        allocator.free(key);
-                        return false;
-                    };
-                    mapping.map.put(allocator, key, val) catch {
-                        allocator.free(key);
-                        allocator.free(val);
-                        return false;
-                    };
-                }
-            }
-
-            ts.deinit();
-
-            writeMappingFile(allocator, test_dir, mapping) catch return false;
-
-            var todos: [4]HookTodo = undefined;
-            for (0..4) |i| {
-                todos[i] = .{ .content = contents[i], .status = statuses[i], .activeForm = forms[i] };
-            }
-
-            const envelope = HookEnvelope{
-                .tool_name = "TodoWrite",
-                .tool_input = .{ .todos = &todos },
-            };
-            const input = std.json.Stringify.valueAlloc(allocator, envelope, .{}) catch return false;
-            defer allocator.free(input);
-
-            const result = runDotWithInput(allocator, &.{ "hook", "sync" }, test_dir, input) catch |err| {
-                std.debug.panic("hook sync: {}", .{err});
-            };
-            defer result.deinit(allocator);
-            if (!isExitCode(result.term, 0)) return false;
-
-            var parsed_map = readMappingFile(allocator, test_dir) catch return false;
-            defer mapping_util.deinit(allocator, &parsed_map);
-
-            var verify = openTestStorage(allocator, test_dir);
-            defer verify.deinit();
-
-            for (0..4) |i| {
-                const status_case = args.statuses[i] % 3;
-                const expected_status: Status = switch (status_case) {
-                    0 => .open,
-                    1 => .active,
-                    else => .closed,
-                };
-
-                if (status_case == 2) {
-                    if (parsed_map.map.get(contents[i]) != null) return false;
-                    const id = ids[i] orelse return false;
-                    const issue = verify.storage.getIssue(id) catch return false;
-                    const iss = issue orelse return false;
-                    defer iss.deinit(allocator);
-                    if (iss.status != .closed) return false;
-                    if (iss.closed_at == null) return false;
-                    continue;
-                }
-
-                const mapped_id = parsed_map.map.get(contents[i]) orelse return false;
-                if (ids[i]) |existing_id| {
-                    if (!std.mem.eql(u8, mapped_id, existing_id)) return false;
-                }
-
-                const issue = verify.storage.getIssue(mapped_id) catch return false;
-                const iss = issue orelse return false;
-                defer iss.deinit(allocator);
-                if (iss.status != expected_status) return false;
-
-                if (!args.existing[i] and forms[i] != null) {
-                    if (!std.mem.eql(u8, iss.description, forms[i].?)) return false;
-                }
-            }
-
-            return true;
-        }
-    }.property, .{ .iterations = 40, .seed = 0xB00B });
 }
 
 test "cli: jsonl hydration imports issues and archives closed" {
@@ -2204,121 +1986,6 @@ test "snap: json output format" {
     ).expectEqual(output.items);
 }
 
-test "cli: hook sync without stdin returns success" {
-    // Regression test for github.com/anthropics/claude-code/issues/6403
-    // hook sync should return 0 when no stdin provided (TTY or timeout)
-    const allocator = std.testing.allocator;
-
-    const test_dir = setupTestDirOrPanic(allocator);
-    defer cleanupTestDirAndFree(allocator, test_dir);
-
-    const init = runDot(allocator, &.{"init"}, test_dir) catch |err| {
-        std.debug.panic("init: {}", .{err});
-    };
-    defer init.deinit(allocator);
-
-    // Call hook sync without any input (simulates missing stdin from Claude Code bug)
-    const result = runDotWithInput(allocator, &.{ "hook", "sync" }, test_dir, null) catch |err| {
-        std.debug.panic("hook sync: {}", .{err});
-    };
-    defer result.deinit(allocator);
-
-    // Should succeed with exit code 0, not block or error
-    try std.testing.expect(isExitCode(result.term, 0));
-    try std.testing.expectEqualStrings("", result.stderr);
-}
-
-test "cli: concurrent hook sync uses locking" {
-    // Test that concurrent hook sync operations don't corrupt mapping file
-    const allocator = std.testing.allocator;
-
-    const test_dir = setupTestDirOrPanic(allocator);
-    defer cleanupTestDirAndFree(allocator, test_dir);
-
-    const init = runDot(allocator, &.{"init"}, test_dir) catch |err| {
-        std.debug.panic("init: {}", .{err});
-    };
-    defer init.deinit(allocator);
-
-    // Use MultiProcess harness to spawn concurrent sync processes
-    var mp = MultiProcess.init(allocator, test_dir);
-
-    // Pre-allocate input buffers (must outlive spawnAll)
-    var input_bufs: [4][256]u8 = undefined;
-    var inputs: [4][]const u8 = undefined;
-    for (0..4) |i| {
-        inputs[i] = std.fmt.bufPrint(&input_bufs[i], "{{\"tool_name\":\"TodoWrite\",\"tool_input\":{{\"todos\":[{{\"content\":\"task-{d}\",\"status\":\"pending\"}}]}}}}", .{i}) catch unreachable;
-        try mp.add(&.{ "hook", "sync" }, inputs[i]);
-    }
-
-    try mp.spawnAll();
-    var results = try mp.waitAll();
-    defer mp.freeResults(&results);
-
-    // At least one should succeed, none should crash (exit 0 or silently skip)
-    // Some may fail due to timing if lock is unavailable during non-blocking check
-    var success_count: usize = 0;
-    for (0..mp.count) |i| {
-        if (results[i]) |r| {
-            if (isExitCode(r.term, 0)) success_count += 1;
-        }
-    }
-    try std.testing.expect(success_count >= 1);
-
-    // Verify mapping file is valid JSON (not corrupted)
-    const mapping_path = std.fmt.allocPrint(allocator, "{s}/.dots/todo-mapping.json", .{test_dir}) catch unreachable;
-    defer allocator.free(mapping_path);
-
-    const file = fs.cwd().openFile(mapping_path, .{}) catch |err| {
-        // File may not exist if all processes hit lock contention - that's OK
-        if (err == error.FileNotFound) return;
-        return err;
-    };
-    defer file.close();
-
-    const content = try file.readToEndAlloc(allocator, max_mapping_bytes);
-    defer allocator.free(content);
-
-    // Should parse as valid JSON
-    const parsed = std.json.parseFromSlice(mapping_util.Mapping, allocator, content, .{
-        .ignore_unknown_fields = true,
-    }) catch |err| {
-        std.debug.print("Mapping file corrupted: {s}\nError: {}\n", .{ content, err });
-        return error.MappingCorrupted;
-    };
-    parsed.deinit();
-}
-
-test "cli: hook sync handles malformed mapping gracefully" {
-    // Test that hook sync fails gracefully with corrupted mapping file
-    const allocator = std.testing.allocator;
-
-    const test_dir = setupTestDirOrPanic(allocator);
-    defer cleanupTestDirAndFree(allocator, test_dir);
-
-    _ = runDot(allocator, &.{"init"}, test_dir) catch |err| {
-        std.debug.panic("init: {}", .{err});
-    };
-
-    // Write corrupted mapping file
-    const mapping_path = std.fmt.allocPrint(allocator, "{s}/.dots/todo-mapping.json", .{test_dir}) catch unreachable;
-    defer allocator.free(mapping_path);
-
-    const file = try fs.cwd().createFile(mapping_path, .{});
-    try file.writeAll("{ invalid json [[[");
-    file.close();
-
-    // Hook sync should fail with error (not crash or corrupt further)
-    const input = "{\"tool_name\":\"TodoWrite\",\"tool_input\":{\"todos\":[{\"content\":\"test\",\"status\":\"pending\"}]}}";
-    const result = runDotWithInput(allocator, &.{ "hook", "sync" }, test_dir, input) catch |err| {
-        std.debug.panic("hook sync: {}", .{err});
-    };
-    defer result.deinit(allocator);
-
-    // Should fail (non-zero exit) due to invalid JSON
-    try std.testing.expect(!isExitCode(result.term, 0));
-}
-
 test "snap: tree output format" {
     const allocator = std.testing.allocator;
 
@@ -2405,7 +2072,7 @@ test "slugify: basic conversion" {
 
     try oh.snap(@src(),
         \\[]u8
-        \\  "fix-user-auth-bug"
+        \\  "fix-user-auth"
     ).expectEqual(slug);
 }
 
@@ -2444,7 +2111,7 @@ test "slugify: special characters stripped" {
 
     try oh.snap(@src(),
         \\[]u8
-        \\  "fix-api-v2-update"
+        \\  "fix-api-v2"
     ).expectEqual(slug);
 }
 

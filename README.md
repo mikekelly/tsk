@@ -4,7 +4,7 @@
 
 > **Fast, minimal task tracking with plain markdown files — no database required**
 
-Minimal task tracker for AI agents with built-in Claude Code hooks.
+Minimal task tracker for AI coding agents.
 
 | | beads (SQLite) | dots (markdown) |
 |---|---:|---:|
@@ -38,7 +38,7 @@ cp zig-out/bin/dot ~/.local/bin/
 
 ```bash
 dot --version
-# Output: dots 0.5.4
+# Output: dots 0.6.0
 ```
 
 ## Quick Start
@@ -279,44 +279,9 @@ When a task is marked done:
 - **Child tasks**: Stay in parent folder until parent is closed
 - **Parent tasks**: Only archive when ALL children are closed (moves entire folder)
 
-## Claude Code Integration
+## Agent Integration
 
-dots has built-in hook support—no Python scripts needed.
-
-### Built-in Hook Commands
-
-```bash
-dot hook session  # Show active/ready tasks at session start
-dot hook sync     # Sync TodoWrite JSON from stdin to dots
-```
-
-### Claude Code Settings
-
-Add to `~/.claude/settings.json`:
-
-```json
-{
-  "hooks": {
-    "SessionStart": [
-      {
-        "hooks": [{"type": "command", "command": "dot hook session"}]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": "TodoWrite",
-        "hooks": [{"type": "command", "command": "dot hook sync"}]
-      }
-    ]
-  }
-}
-```
-
-The `sync` hook automatically:
-- Creates `.dots/` directory if needed
-- Maps TodoWrite content to dot IDs (stored in `.dots/todo-mapping.json`)
-- Creates new dots for new todos
-- Marks dots as done when todos are completed
+dots is a pure CLI tool. For Claude Code and Codex integration (session management, auto-continuation, context clearing), use [banjo](https://github.com/joelreymont/banjo).
 
 ## Migrating from beads
 

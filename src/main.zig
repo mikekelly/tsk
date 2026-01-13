@@ -3,7 +3,6 @@ const fs = std.fs;
 const Allocator = std.mem.Allocator;
 const storage_mod = @import("storage.zig");
 const build_options = @import("build_options");
-const mapping_util = @import("util/mapping.zig");
 
 const libc = @cImport({
     @cInclude("time.h");
@@ -14,15 +13,10 @@ const Issue = storage_mod.Issue;
 const Status = storage_mod.Status;
 
 const DOTS_DIR = storage_mod.DOTS_DIR;
-const MAPPING_FILE = DOTS_DIR ++ "/todo-mapping.json";
-const LOCK_FILE = DOTS_DIR ++ "/todo-mapping.lock";
-const max_hook_input_bytes = 1024 * 1024;
-const max_mapping_bytes = 1024 * 1024;
 const max_jsonl_line_bytes = 1024 * 1024;
 const default_priority: i64 = 2;
 const MIN_PRIORITY: i64 = 0;
 const MAX_PRIORITY: i64 = 9;
-const HOOK_POLL_TIMEOUT_MS: i32 = 500;
 
 // Command dispatch table
 const Handler = *const fn (Allocator, []const []const u8) anyerror!void;
@@ -42,7 +36,6 @@ const commands = [_]Command{
     .{ .names = &.{"close"}, .handler = cmdClose },
     .{ .names = &.{"purge"}, .handler = cmdPurge },
     .{ .names = &.{"slugify"}, .handler = cmdSlugify },
-    .{ .names = &.{"hook"}, .handler = cmdHook },
     .{ .names = &.{"init"}, .handler = cmdInitWrapper },
     .{ .names = &.{ "help", "--help", "-h" }, .handler = cmdHelp },
     .{ .names = &.{ "--version", "-v" }, .handler = cmdVersion },
@@ -71,6 +64,8 @@ pub fn main() !void {
         const cmd = args[1];
         if (findCommand(cmd)) |handler| {
             try handler(allocator, args[2..]);
+        } else if (std.mem.eql(u8, cmd, "hook")) {
+            fatal("Unknown command: hook\n", .{});
         } else {
             // Quick add: dot "title"
             try cmdAdd(allocator, args[1..]);
@@ -719,301 +714,6 @@ fn writeIssueJson(issue: Issue, w: *std.Io.Writer) !void {
         .close_reason = issue.close_reason,
     };
     try std.json.Stringify.value(json_issue, .{}, w);
-}
-
-// Claude Code hook handlers
-fn cmdHook(allocator: Allocator, args: []const []const u8) !void {
-    if (args.len == 0) fatal("Usage: dot hook <session|sync>\n", .{});
-
-    const hook_map = std.StaticStringMap(*const fn (Allocator) anyerror!void).initComptime(.{
-        .{ "session", hookSession },
-        .{ "sync", hookSync },
-    });
-
-    const handler = hook_map.get(args[0]) orelse fatal("Unknown hook: {s}\n", .{args[0]});
-    try handler(allocator);
-}
-
-fn hookSession(allocator: Allocator) !void {
-    // Check if .dots exists
-    fs.cwd().access(DOTS_DIR, .{}) catch |err| switch (err) {
-        error.FileNotFound => return,
-        else => return err,
-    };
-
-    var storage = try openStorage(allocator);
-    defer storage.close();
-
-    const active = try storage.listIssues(.active);
-    defer storage_mod.freeIssues(allocator, active);
-
-    const ready = try storage.getReadyIssues();
-    defer storage_mod.freeIssues(allocator, ready);
-
-    if (active.len == 0 and ready.len == 0) return;
-
-    const w = stdout();
-    try w.writeAll("--- DOTS ---\n");
-    if (active.len > 0) {
-        try w.writeAll("ACTIVE:\n");
-        for (active) |d| try w.print("  [{s}] {s}\n", .{ d.id, d.title });
-    }
-    if (ready.len > 0) {
-        try w.writeAll("READY:\n");
-        for (ready) |d| try w.print("  [{s}] {s}\n", .{ d.id, d.title });
-    }
-}
-
-const Mapping = mapping_util.Mapping;
-
-const HookEnvelope = struct {
-    tool_name: []const u8,
-    tool_input: ?std.json.Value = null,
-};
-
-const HookTodoInput = struct {
-    todos: []const HookTodo,
-};
-
-const HookTodo = struct {
-    content: []const u8,
-    status: []const u8,
-    activeForm: ?[]const u8 = null,
-};
-
-fn parseJsonSliceOrError(
-    comptime T: type,
-    allocator: Allocator,
-    input: []const u8,
-    invalid_err: anyerror,
-    options: std.json.ParseOptions,
-) !std.json.Parsed(T) {
-    return std.json.parseFromSlice(T, allocator, input, options) catch |err| switch (err) {
-        error.OutOfMemory => return err,
-        else => return invalid_err,
-    };
-}
-
-fn parseJsonValueOrError(
-    comptime T: type,
-    allocator: Allocator,
-    input: std.json.Value,
-    invalid_err: anyerror,
-    options: std.json.ParseOptions,
-) !std.json.Parsed(T) {
-    return std.json.parseFromValue(T, allocator, input, options) catch |err| switch (err) {
-        error.OutOfMemory => return err,
-        else => return invalid_err,
-    };
-}
-
-const hook_status_map = std.StaticStringMap(void).initComptime(.{
-    .{ "pending", {} },
-    .{ "in_progress", {} },
-    .{ "completed", {} },
-});
-
-fn validateHookStatus(status: []const u8) bool {
-    return hook_status_map.has(status);
-}
-
-fn hookSync(allocator: Allocator) !void {
-    // Read stdin with timeout to avoid blocking forever when Claude Code
-    // doesn't provide input (known bug: github.com/anthropics/claude-code/issues/6403)
-    const stdin = fs.File.stdin();
-    const stdin_fd = stdin.handle;
-
-    // If stdin is a TTY, no hook input expected
-    if (std.posix.isatty(stdin_fd)) return;
-
-    // Poll for data with 500ms timeout (longer for CI environments)
-    var fds = [_]std.posix.pollfd{.{
-        .fd = stdin_fd,
-        .events = std.posix.POLL.IN,
-        .revents = 0,
-    }};
-    const poll_result = try std.posix.poll(&fds, HOOK_POLL_TIMEOUT_MS);
-    if (poll_result == 0) return; // Timeout, no data
-    if (fds[0].revents & std.posix.POLL.IN == 0) return; // No data available
-
-    const input = try stdin.readToEndAlloc(allocator, max_hook_input_bytes);
-    defer allocator.free(input);
-    if (input.len == 0) return;
-
-    // Parse JSON
-    const parsed = try parseJsonSliceOrError(
-        HookEnvelope,
-        allocator,
-        input,
-        error.InvalidHookInput,
-        .{ .ignore_unknown_fields = true },
-    );
-    defer parsed.deinit();
-
-    if (!std.mem.eql(u8, parsed.value.tool_name, "TodoWrite")) return;
-    const tool_input = parsed.value.tool_input orelse return error.InvalidHookInput;
-
-    const parsed_input = try parseJsonValueOrError(
-        HookTodoInput,
-        allocator,
-        tool_input,
-        error.InvalidHookInput,
-        .{ .ignore_unknown_fields = true },
-    );
-    defer parsed_input.deinit();
-    const todos = parsed_input.value.todos;
-
-    // Validate all todos before any operations
-    for (todos) |todo| {
-        if (todo.content.len == 0) return error.InvalidHookInput;
-        if (!validateHookStatus(todo.status)) return error.InvalidHookInput;
-    }
-
-    var storage = try openStorage(allocator);
-    defer storage.close();
-
-    // Acquire lock for mapping file (prevents TOCTOU race with concurrent syncs)
-    const lock_file = fs.cwd().createFile(LOCK_FILE, .{ .lock = .exclusive }) catch |err| switch (err) {
-        error.WouldBlock => return, // Another sync in progress, skip
-        else => return err,
-    };
-    defer {
-        lock_file.close();
-        fs.cwd().deleteFile(LOCK_FILE) catch {};
-    }
-
-    // Get prefix for ID generation
-    const prefix = try storage_mod.getOrCreatePrefix(allocator, &storage);
-    defer allocator.free(prefix);
-
-    // Load mapping (under lock)
-    var mapping = try loadMapping(allocator);
-    defer mapping_util.deinit(allocator, &mapping);
-
-    var ts_buf: [40]u8 = undefined;
-    const now = try formatTimestamp(&ts_buf);
-
-    // Process todos
-    for (todos) |todo| {
-        const content = todo.content;
-        const status = todo.status;
-
-        if (std.mem.eql(u8, status, "completed")) {
-            // Mark as done if we have mapping
-            const dot_id = mapping.map.get(content) orelse {
-                stderr().print("MissingTodoMapping: {s}\n", .{content}) catch {};
-                return error.MissingTodoMapping;
-            };
-            try storage.updateStatus(dot_id, .closed, now, "Completed via TodoWrite");
-            if (mapping.map.fetchOrderedRemove(content)) |kv| {
-                allocator.free(kv.key);
-                allocator.free(kv.value);
-            }
-        } else if (mapping.map.get(content)) |dot_id| {
-            // Update status if changed
-            const new_status: Status = if (std.mem.eql(u8, status, "in_progress")) .active else .open;
-            try storage.updateStatus(dot_id, new_status, null, null);
-        } else {
-            // Create new dot
-            const id = try storage_mod.generateIdWithTitle(allocator, prefix, content);
-            defer allocator.free(id);
-            const desc = todo.activeForm orelse "";
-            const is_in_progress = std.mem.eql(u8, status, "in_progress");
-            const priority: i64 = if (is_in_progress) 1 else default_priority;
-
-            const issue = Issue{
-                .id = id,
-                .title = content,
-                .description = desc,
-                .status = if (is_in_progress) .active else .open,
-                .priority = priority,
-                .issue_type = "task",
-                .assignee = null,
-                .created_at = now,
-                .closed_at = null,
-                .close_reason = null,
-                .blocks = &.{},
-            };
-
-            try storage.createIssue(issue, null);
-
-            // Save mapping
-            const key = try allocator.dupe(u8, content);
-            const val = allocator.dupe(u8, id) catch |err| {
-                allocator.free(key);
-                return err;
-            };
-            mapping.map.put(allocator, key, val) catch |err| {
-                allocator.free(key);
-                allocator.free(val);
-                return err;
-            };
-        }
-    }
-
-    // Save mapping
-    try saveMappingAtomic(mapping);
-}
-
-fn loadMapping(allocator: Allocator) !Mapping {
-    var map: Mapping = .{};
-    errdefer mapping_util.deinit(allocator, &map);
-
-    const file = fs.cwd().openFile(MAPPING_FILE, .{}) catch |err| switch (err) {
-        error.FileNotFound => return map,
-        else => return err,
-    };
-    defer file.close();
-
-    const content = try file.readToEndAlloc(allocator, max_mapping_bytes);
-    defer allocator.free(content);
-
-    const parsed = try parseJsonSliceOrError(
-        Mapping,
-        allocator,
-        content,
-        error.InvalidMapping,
-        .{ .ignore_unknown_fields = false },
-    );
-    defer parsed.deinit();
-
-    var it = parsed.value.map.iterator();
-    while (it.next()) |entry| {
-        const key = try allocator.dupe(u8, entry.key_ptr.*);
-        const val = allocator.dupe(u8, entry.value_ptr.*) catch |err| {
-            allocator.free(key);
-            return err;
-        };
-        map.map.put(allocator, key, val) catch |err| {
-            allocator.free(key);
-            allocator.free(val);
-            return err;
-        };
-    }
-
-    return map;
-}
-
-fn saveMappingAtomic(map: Mapping) !void {
-    const tmp_file = MAPPING_FILE ++ ".tmp";
-
-    // Write to temp file
-    const file = try fs.cwd().createFile(tmp_file, .{});
-    defer file.close();
-    errdefer fs.cwd().deleteFile(tmp_file) catch |err| switch (err) {
-        error.FileNotFound => {}, // Already deleted
-        else => {}, // Best effort cleanup
-    };
-
-    var buffer: [4096]u8 = undefined;
-    var file_writer = file.writer(&buffer);
-    const w = &file_writer.interface;
-    try std.json.Stringify.value(map, .{}, w);
-    try w.flush();
-    try file.sync();
-
-    // Atomic rename
-    try fs.cwd().rename(tmp_file, MAPPING_FILE);
 }
 
 // JSONL hydration for migration
