@@ -2271,11 +2271,8 @@ test "cli: slugify preserves hex suffix from original ID" {
     try std.testing.expectEqual(@as(usize, 1), parsed.value.len);
     const new_id = parsed.value[0].id;
 
-    // Should end with same hex suffix
-    try std.testing.expect(std.mem.endsWith(u8, new_id, "abcd1234"));
-    // Should contain slug
-    try std.testing.expect(std.mem.indexOf(u8, new_id, "db-migration") != null or
-        std.mem.indexOf(u8, new_id, "db-migr") != null);
+    // Should have slug and preserve hex suffix
+    try std.testing.expectEqualStrings("dots-db-migration-abcd1234", new_id);
 }
 
 test "cli: slugify updates dependency references" {
@@ -2349,11 +2346,9 @@ test "cli: slugify updates dependency references" {
 
     const updated_dep = found_dep orelse return error.TestUnexpectedResult;
 
-    // Should have one block reference
+    // Block should reference the new slugified ID
     try std.testing.expectEqual(@as(usize, 1), updated_dep.blocks.len);
-    // Block should reference the new slugified ID (contains "api" and ends with hex)
-    try std.testing.expect(std.mem.indexOf(u8, updated_dep.blocks[0], "api") != null);
-    try std.testing.expect(std.mem.endsWith(u8, updated_dep.blocks[0], "11111111"));
+    try std.testing.expectEqualStrings("dots-api-endpoint-11111111", updated_dep.blocks[0]);
 }
 
 test "cli: slugify skips already-slugified IDs" {
