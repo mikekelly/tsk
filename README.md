@@ -18,11 +18,13 @@ tsk init
 tsk "Build auth system"
 # Output: a1b2c3d4
 
+# Add subtask
 tsk add "Design schema" -P a1b2c3d4
 # Output: e5f6a7b8
 
-tsk add "Implement endpoints" -P a1b2c3d4
-# Output: c9d0e1f2
+# Add subtask blocked by other task
+tsk add "Implement endpoints" -P a1b2c3d4 -a e5f6a7b8
+# Output: c9d0e1f2 
 
 # View hierarchy
 tsk tree
@@ -73,15 +75,19 @@ Creates `.tsk/` directory. Runs `git add .tsk` if in a git repository. Safe to r
 ### Add Task
 
 ```bash
-tsk add "title" [-d "description"] [-P PARENT_ID] [-a AFTER_ID] [--json]
+tsk add "title" [-d "description"] [-P PARENT_ID] [-a BLOCKER_ID] [--after ID | --before ID] [--json]
 tsk "title"  # shorthand for: tsk add "title"
 ```
 
 Options:
 - `-d "text"`: Long description (markdown body of the file)
 - `-P ID`: Parent task ID (creates folder hierarchy)
-- `-a ID`: Blocked by task ID (dependency)
+- `-a ID`: Blocked by task ID (dependency - new task waits for this one)
+- `--after ID`: Position after sibling task (inherits parent from target)
+- `--before ID`: Position before sibling task (inherits parent from target)
 - `--json`: Output created task as JSON
+
+Note: `--after`/`--before` cannot be combined with `-P` (parent is inferred from the target task).
 
 Examples:
 ```bash
@@ -89,10 +95,10 @@ tsk add "Design API"
 # Output: 1a2b3c4d
 
 tsk add "Implement API" -a 1a2b3c4d -d "REST endpoints for user management"
-# Output: 3c4d5e6f
+# Output: 3c4d5e6f (blocked until 1a2b3c4d is done)
 
-tsk add "Write tests" --json
-# Output: {"id":"5e6f7a8b","title":"Write tests","status":"open",...}
+tsk add "Write tests" --after 3c4d5e6f
+# Output: 5e6f7a8b (positioned after 3c4d5e6f, same parent)
 ```
 
 ### Start Working
