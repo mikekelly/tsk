@@ -2177,6 +2177,133 @@ test "snap: tree output format" {
     ).expectEqual(normalized.items);
 }
 
+test "cli: tree ignores missing parent" {
+    const allocator = std.testing.allocator;
+
+    const test_dir = setupTestDirOrPanic(allocator);
+    defer cleanupTestDirAndFree(allocator, test_dir);
+
+    const init = runDot(allocator, &.{"init"}, test_dir) catch |err| {
+        std.debug.panic("init: {}", .{err});
+    };
+    defer init.deinit(allocator);
+
+    var dir = fs.openDirAbsolute(test_dir, .{}) catch |err| {
+        std.debug.panic("open dir: {}", .{err});
+    };
+    defer dir.close();
+
+    var dots_dir = dir.openDir(".dots", .{ .iterate = true }) catch |err| {
+        std.debug.panic("open .dots: {}", .{err});
+    };
+    defer dots_dir.close();
+
+    dots_dir.makeDir("orphan") catch |err| {
+        std.debug.panic("mkdir orphan: {}", .{err});
+    };
+
+    const orphan =
+        \\---
+        \\title: Orphan child
+        \\status: open
+        \\priority: 2
+        \\issue-type: task
+        \\created-at: 2024-01-01T00:00:00Z
+        \\---
+    ;
+    dots_dir.writeFile(.{ .sub_path = "orphan/orphan-child.md", .data = orphan }) catch |err| {
+        std.debug.panic("write orphan: {}", .{err});
+    };
+
+    const tree = runDot(allocator, &.{"tree"}, test_dir) catch |err| {
+        std.debug.panic("tree: {}", .{err});
+    };
+    defer tree.deinit(allocator);
+
+    try std.testing.expect(isExitCode(tree.term, 0));
+
+    const oh = OhSnap{};
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "[orphan-child] ○ Orphan child
+        \\"
+    ).expectEqual(tree.stdout);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  ""
+    ).expectEqual(tree.stderr);
+}
+
+test "cli: fix promotes orphan children" {
+    const allocator = std.testing.allocator;
+
+    const test_dir = setupTestDirOrPanic(allocator);
+    defer cleanupTestDirAndFree(allocator, test_dir);
+
+    const init = runDot(allocator, &.{"init"}, test_dir) catch |err| {
+        std.debug.panic("init: {}", .{err});
+    };
+    defer init.deinit(allocator);
+
+    var dir = fs.openDirAbsolute(test_dir, .{}) catch |err| {
+        std.debug.panic("open dir: {}", .{err});
+    };
+    defer dir.close();
+
+    var dots_dir = dir.openDir(".dots", .{ .iterate = true }) catch |err| {
+        std.debug.panic("open .dots: {}", .{err});
+    };
+    defer dots_dir.close();
+
+    dots_dir.makeDir("orphan") catch |err| {
+        std.debug.panic("mkdir orphan: {}", .{err});
+    };
+
+    const orphan =
+        \\---
+        \\title: Orphan child
+        \\status: open
+        \\priority: 2
+        \\issue-type: task
+        \\created-at: 2024-01-01T00:00:00Z
+        \\---
+    ;
+    dots_dir.writeFile(.{ .sub_path = "orphan/orphan-child.md", .data = orphan }) catch |err| {
+        std.debug.panic("write orphan: {}", .{err});
+    };
+
+    const fix = runDot(allocator, &.{"fix"}, test_dir) catch |err| {
+        std.debug.panic("fix: {}", .{err});
+    };
+    defer fix.deinit(allocator);
+
+    try std.testing.expect(isExitCode(fix.term, 0));
+
+    const oh = OhSnap{};
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "Fixed 1 orphan parent(s), moved 1 file(s)
+        \\"
+    ).expectEqual(fix.stdout);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  ""
+    ).expectEqual(fix.stderr);
+
+    _ = dots_dir.statFile("orphan-child.md") catch |err| {
+        std.debug.panic("stat moved orphan: {}", .{err});
+    };
+
+    if (dots_dir.openDir("orphan", .{})) |orphan_dir| {
+        var od = orphan_dir;
+        od.close();
+        std.debug.panic("orphan dir still exists", .{});
+    } else |err| switch (err) {
+        error.FileNotFound => {},
+        else => std.debug.panic("open orphan dir: {}", .{err}),
+    }
+}
+
 // ============================================================================
 // Slugify tests
 // ============================================================================

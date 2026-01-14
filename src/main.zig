@@ -31,6 +31,7 @@ const commands = [_]Command{
     .{ .names = &.{"show"}, .handler = cmdShow },
     .{ .names = &.{"ready"}, .handler = cmdReady },
     .{ .names = &.{"tree"}, .handler = cmdTree },
+    .{ .names = &.{"fix"}, .handler = cmdFix },
     .{ .names = &.{"find"}, .handler = cmdFind },
     .{ .names = &.{"update"}, .handler = cmdUpdate },
     .{ .names = &.{"close"}, .handler = cmdClose },
@@ -50,7 +51,11 @@ fn findCommand(name: []const u8) ?Handler {
     return null;
 }
 
-pub fn main() !void {
+pub fn main() void {
+    if (run()) |_| {} else |err| handleError(err);
+}
+
+fn run() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer if (gpa.deinit() == .leak) @panic("memory leak detected");
     const allocator = gpa.allocator();
@@ -123,6 +128,31 @@ fn fatal(comptime fmt: []const u8, args: anytype) noreturn {
     std.process.exit(1);
 }
 
+fn handleError(err: anyerror) noreturn {
+    switch (err) {
+        error.OutOfMemory => fatal("Out of memory\n", .{}),
+        error.FileNotFound => fatal("Missing issue file or directory in .dots\n", .{}),
+        error.AccessDenied => fatal("Permission denied\n", .{}),
+        error.NotDir => fatal("Expected a directory but found a file\n", .{}),
+        error.InvalidFrontmatter => fatal("Invalid issue frontmatter\n", .{}),
+        error.InvalidStatus => fatal("Invalid issue status\n", .{}),
+        error.InvalidId => fatal("Invalid issue id\n", .{}),
+        error.DependencyNotFound => fatal("Dependency not found\n", .{}),
+        error.DependencyCycle => fatal("Dependency would create a cycle\n", .{}),
+        error.IssueAlreadyExists => fatal("Issue already exists\n", .{}),
+        error.ChildrenNotClosed => fatal("Cannot close: children are not all closed\n", .{}),
+        error.IssueNotFound => fatal("Issue not found\n", .{}),
+        error.AmbiguousId => fatal("Ambiguous issue id\n", .{}),
+        error.InvalidJsonl => fatal("Invalid JSONL file\n", .{}),
+        error.JsonlLineTooLong => fatal("JSONL line too long\n", .{}),
+        error.InvalidTimestamp => fatal("Invalid system time\n", .{}),
+        error.TimestampOverflow => fatal("System time out of range\n", .{}),
+        error.LocaltimeFailed => fatal("Failed to read local time\n", .{}),
+        error.IoError => fatal("I/O error\n", .{}),
+        else => fatal("Unexpected internal error (code: {s})\n", .{@errorName(err)}),
+    }
+}
+
 // ID resolution helper - resolves short ID or exits with error
 fn resolveIdOrFatal(storage: *storage_mod.Storage, id: []const u8) []const u8 {
     return storage.resolveId(id) catch |err| switch (err) {
@@ -168,6 +198,7 @@ const USAGE =
     \\  dot show <id>                Show dot details
     \\  dot ready [--json]           Show unblocked dots
     \\  dot tree                     Show hierarchy
+    \\  dot fix                      Repair missing parents
     \\  dot find "query"             Search dots
     \\  dot purge                    Delete archived dots
     \\  dot init                     Initialize .dots directory
@@ -492,6 +523,20 @@ fn cmdTree(allocator: Allocator, _: []const []const u8) !void {
             );
         }
     }
+}
+
+fn cmdFix(allocator: Allocator, _: []const []const u8) !void {
+    var storage = try openStorage(allocator);
+    defer storage.close();
+
+    const result = try storage.fixOrphans();
+
+    const w = stdout();
+    if (result.folders == 0) {
+        try w.writeAll("No fixes needed\n");
+        return;
+    }
+    try w.print("Fixed {d} orphan parent(s), moved {d} file(s)\n", .{ result.folders, result.files });
 }
 
 fn cmdFind(allocator: Allocator, args: []const []const u8) !void {

@@ -307,6 +307,18 @@ pub fn freeChildIssues(allocator: Allocator, issues: []const ChildIssue) void {
     allocator.free(issues);
 }
 
+pub const FixResult = struct {
+    folders: usize,
+    files: usize,
+};
+
+pub fn freeOrphanParents(allocator: Allocator, orphans: []const []const u8) void {
+    for (orphans) |name| {
+        allocator.free(name);
+    }
+    allocator.free(orphans);
+}
+
 // YAML Frontmatter parsing
 const Frontmatter = struct {
     title: []const u8 = "",
@@ -1706,6 +1718,90 @@ pub const Storage = struct {
         return false;
     }
 
+    fn appendOrphanChildren(self: *Self, folder_name: []const u8, issues: *std.ArrayList(Issue)) !void {
+        var folder = self.dots_dir.openDir(folder_name, .{ .iterate = true }) catch |err| switch (err) {
+            error.FileNotFound, error.NotDir => return,
+            else => return err,
+        };
+        defer folder.close();
+
+        var iter = folder.iterate();
+        while (try iter.next()) |entry| {
+            if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".md")) continue;
+            const id = entry.name[0 .. entry.name.len - 3];
+            if (std.mem.eql(u8, id, folder_name)) continue;
+
+            var path_buf: [MAX_PATH_LEN]u8 = undefined;
+            const path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ folder_name, entry.name }) catch return StorageError.IoError;
+            const issue = self.readIssueFromPath(path, id) catch |err| switch (err) {
+                StorageError.InvalidFrontmatter, StorageError.InvalidStatus => continue,
+                error.FileNotFound => continue,
+                else => return err,
+            };
+
+            if (issue.status != .closed) {
+                try issues.append(self.allocator, issue);
+            } else {
+                issue.deinit(self.allocator);
+            }
+        }
+    }
+
+    fn scanRoots(
+        self: *Self,
+        issues: ?*std.ArrayList(Issue),
+        orphans: ?*std.ArrayList([]const u8),
+    ) !void {
+        if (issues == null and orphans == null) return;
+
+        // Only collect from root level of .dots (not archive, not subdirs for children)
+        var iter = self.dots_dir.iterate();
+        while (try iter.next()) |entry| {
+            if (entry.kind == .file and std.mem.endsWith(u8, entry.name, ".md")) {
+                if (issues) |list| {
+                    const id = entry.name[0 .. entry.name.len - 3];
+                    const issue = self.readIssueFromPath(entry.name, id) catch |err| switch (err) {
+                        StorageError.InvalidFrontmatter, StorageError.InvalidStatus => continue,
+                        else => return err,
+                    };
+
+                    if (issue.status != .closed) {
+                        try list.append(self.allocator, issue);
+                    } else {
+                        issue.deinit(self.allocator);
+                    }
+                }
+            } else if (entry.kind == .directory and !std.mem.eql(u8, entry.name, "archive")) {
+                // Folder = parent issue
+                var path_buf: [MAX_PATH_LEN]u8 = undefined;
+                const path = std.fmt.bufPrint(&path_buf, "{s}/{s}.md", .{ entry.name, entry.name }) catch return StorageError.IoError;
+                const issue = self.readIssueFromPath(path, entry.name) catch |err| switch (err) {
+                    StorageError.InvalidFrontmatter, StorageError.InvalidStatus, error.FileNotFound => {
+                        if (orphans) |list| {
+                            const name = try self.allocator.dupe(u8, entry.name);
+                            try list.append(self.allocator, name);
+                        }
+                        if (issues) |list| {
+                            try self.appendOrphanChildren(entry.name, list);
+                        }
+                        continue;
+                    },
+                    else => return err,
+                };
+
+                if (issues) |list| {
+                    if (issue.status != .closed) {
+                        try list.append(self.allocator, issue);
+                    } else {
+                        issue.deinit(self.allocator);
+                    }
+                } else {
+                    issue.deinit(self.allocator);
+                }
+            }
+        }
+    }
+
     pub fn getRootIssues(self: *Self) ![]Issue {
         var issues: std.ArrayList(Issue) = .{};
         errdefer {
@@ -1713,42 +1809,91 @@ pub const Storage = struct {
             issues.deinit(self.allocator);
         }
 
-        // Only collect from root level of .dots (not archive, not subdirs for children)
-        var iter = self.dots_dir.iterate();
-        while (try iter.next()) |entry| {
-            if (entry.kind == .file and std.mem.endsWith(u8, entry.name, ".md")) {
-                const id = entry.name[0 .. entry.name.len - 3];
-                const issue = self.readIssueFromPath(entry.name, id) catch |err| switch (err) {
-                    StorageError.InvalidFrontmatter, StorageError.InvalidStatus => continue,
-                    else => return err,
-                };
-
-                if (issue.status != .closed) {
-                    try issues.append(self.allocator, issue);
-                } else {
-                    issue.deinit(self.allocator);
-                }
-            } else if (entry.kind == .directory and !std.mem.eql(u8, entry.name, "archive")) {
-                // Folder = parent issue
-                var path_buf: [MAX_PATH_LEN]u8 = undefined;
-                const path = std.fmt.bufPrint(&path_buf, "{s}/{s}.md", .{ entry.name, entry.name }) catch return StorageError.IoError;
-                const issue = self.readIssueFromPath(path, entry.name) catch |err| switch (err) {
-                    StorageError.InvalidFrontmatter, StorageError.InvalidStatus => continue,
-                    else => return err,
-                };
-
-                if (issue.status != .closed) {
-                    try issues.append(self.allocator, issue);
-                } else {
-                    issue.deinit(self.allocator);
-                }
-            }
-        }
+        try self.scanRoots(&issues, null);
 
         // Sort by priority, then created_at
         std.mem.sort(Issue, issues.items, {}, Issue.order);
 
         return issues.toOwnedSlice(self.allocator);
+    }
+
+    pub fn listOrphanParents(self: *Self) ![]const []const u8 {
+        var orphans: std.ArrayList([]const u8) = .{};
+        errdefer {
+            for (orphans.items) |name| self.allocator.free(name);
+            orphans.deinit(self.allocator);
+        }
+
+        try self.scanRoots(null, &orphans);
+
+        return orphans.toOwnedSlice(self.allocator);
+    }
+
+    pub fn fixOrphans(self: *Self) !FixResult {
+        const orphans = try self.listOrphanParents();
+        defer freeOrphanParents(self.allocator, orphans);
+
+        var folders: usize = 0;
+        var files: usize = 0;
+        for (orphans) |name| {
+            const moved = try self.promoteOrphanFolder(name);
+            folders += 1;
+            files += moved;
+        }
+
+        return FixResult{
+            .folders = folders,
+            .files = files,
+        };
+    }
+
+    fn promoteOrphanFolder(self: *Self, folder_name: []const u8) !usize {
+        var folder = self.dots_dir.openDir(folder_name, .{ .iterate = true }) catch |err| switch (err) {
+            error.FileNotFound, error.NotDir => return 0,
+            else => return err,
+        };
+        defer folder.close();
+
+        var names: std.ArrayList([]const u8) = .{};
+        errdefer {
+            for (names.items) |name| self.allocator.free(name);
+            names.deinit(self.allocator);
+        }
+
+        var iter = folder.iterate();
+        while (try iter.next()) |entry| {
+            if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".md")) continue;
+
+            const name = try self.allocator.dupe(u8, entry.name);
+            try names.append(self.allocator, name);
+        }
+
+        for (names.items) |name| {
+            if (self.dots_dir.statFile(name)) |_| {
+                return StorageError.IssueAlreadyExists;
+            } else |_| {}
+        }
+
+        for (names.items) |name| {
+            var src_buf: [MAX_PATH_LEN]u8 = undefined;
+            const src = std.fmt.bufPrint(&src_buf, "{s}/{s}", .{ folder_name, name }) catch return StorageError.IoError;
+            self.dots_dir.rename(src, name) catch |err| switch (err) {
+                error.PathAlreadyExists => return StorageError.IssueAlreadyExists,
+                else => return err,
+            };
+        }
+
+        const moved = names.items.len;
+        for (names.items) |name| self.allocator.free(name);
+        names.deinit(self.allocator);
+
+        self.dots_dir.deleteDir(folder_name) catch |err| switch (err) {
+            error.DirNotEmpty => {},
+            error.FileNotFound => {},
+            else => return err,
+        };
+
+        return moved;
     }
 
     fn getChildIssues(self: *Self, parent_id: []const u8) ![]Issue {

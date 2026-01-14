@@ -175,6 +175,13 @@ Output:
   +- [4d5e6f7] o Write tests (blocked)
 ```
 
+### Fix Orphans
+
+```bash
+dot fix
+```
+Promotes orphaned children to root and removes missing parent folders.
+
 ### Search Tasks
 
 ```bash
