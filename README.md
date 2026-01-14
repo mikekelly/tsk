@@ -1,8 +1,14 @@
 # tsk
 
-> **Opinionated fork of [dots](https://github.com/joelreymont/dots) - Fast, minimal task tracking with plain markdown files**
+Minimal task tracker for AI coding agents. Fast, minimal task tracking with plain markdown files.
 
-Minimal task tracker for AI coding agents.
+This is an opinionated fork of [dots](https://github.com/joelreymont/dots).
+
+- ability to insert tasks inbetween other tasks
+- ability to order/reorder tasks
+- removed task priority
+- removed slugs from task ids
+- renamed `on` and `off` to `start` and `complete`
 
 ## What is tsk?
 
