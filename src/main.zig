@@ -162,6 +162,14 @@ fn resolveIdOrFatal(storage: *storage_mod.Storage, id: []const u8) []const u8 {
     };
 }
 
+fn resolveIdActiveOrFatal(storage: *storage_mod.Storage, id: []const u8) []const u8 {
+    return storage.resolveIdActive(id) catch |err| switch (err) {
+        error.IssueNotFound => fatal("Issue not found: {s}\n", .{id}),
+        error.AmbiguousId => fatal("Ambiguous ID: {s}\n", .{id}),
+        else => fatal("Error resolving ID: {s}\n", .{id}),
+    };
+}
+
 // Status parsing helper
 fn parseStatusArg(status_str: []const u8) Status {
     return Status.parse(status_str) orelse fatal("Invalid status: {s}\n", .{status_str});
@@ -197,9 +205,9 @@ const USAGE =
     \\  dot rm <id>                  Remove a dot
     \\  dot show <id>                Show dot details
     \\  dot ready [--json]           Show unblocked dots
-    \\  dot tree                     Show hierarchy
+    \\  dot tree [id]                Show hierarchy (with id: includes closed children)
     \\  dot fix                      Repair missing parents
-    \\  dot find "query"             Search dots
+    \\  dot find "query"             Search all dots (open first, then archived)
     \\  dot purge                    Delete archived dots
     \\  dot init                     Initialize .dots directory
     \\
@@ -495,20 +503,61 @@ fn cmdShow(allocator: Allocator, args: []const []const u8) !void {
     if (iss.close_reason) |r| try w.print("Reason:   {s}\n", .{r});
 }
 
-fn cmdTree(allocator: Allocator, _: []const []const u8) !void {
+fn cmdTree(allocator: Allocator, args: []const []const u8) !void {
+    if (hasFlag(args, "--help") or hasFlag(args, "-h")) {
+        const w = stdout();
+        try w.writeAll(
+            \\Usage: dot tree [id]
+            \\
+            \\Show dot hierarchy.
+            \\
+            \\Without arguments: shows all open root dots and their children.
+            \\With id: shows that specific dot's tree (including closed children).
+            \\
+            \\Examples:
+            \\  dot tree                    Show all open root dots
+            \\  dot tree my-project         Show specific dot and its children
+            \\
+        );
+        return;
+    }
+    if (args.len > 1) fatal("Usage: dot tree [id]\n", .{});
+
     var storage = try openStorage(allocator);
     defer storage.close();
 
-    const roots = try storage.getRootIssues();
-    defer storage_mod.freeIssues(allocator, roots);
-
-    const all_issues = try storage.listAllIssuesIncludingArchived();
+    const all_issues = try storage.listIssues(null);
     defer storage_mod.freeIssues(allocator, all_issues);
 
     var status_by_id = try storage.buildStatusMap(all_issues);
     defer status_by_id.deinit();
 
     const w = stdout();
+    if (args.len == 1) {
+        const resolved = resolveIdActiveOrFatal(&storage, args[0]);
+        defer allocator.free(resolved);
+
+        const root = try storage.getIssue(resolved) orelse fatal("Issue not found: {s}\n", .{args[0]});
+        defer root.deinit(allocator);
+
+        try w.print("[{s}] {s} {s}\n", .{ root.id, root.status.symbol(), root.title });
+
+        const children = try storage.getChildrenWithStatusMap(root.id, &status_by_id);
+        defer storage_mod.freeChildIssues(allocator, children);
+
+        for (children) |child| {
+            const blocked_msg: []const u8 = if (child.blocked) " (blocked)" else "";
+            try w.print(
+                "  └─ [{s}] {s} {s}{s}\n",
+                .{ child.issue.id, child.issue.status.symbol(), child.issue.title, blocked_msg },
+            );
+        }
+        return;
+    }
+
+    const roots = try storage.getRootIssues();
+    defer storage_mod.freeIssues(allocator, roots);
+
     for (roots) |root| {
         try w.print("[{s}] {s} {s}\n", .{ root.id, root.status.symbol(), root.title });
 
@@ -540,7 +589,22 @@ fn cmdFix(allocator: Allocator, _: []const []const u8) !void {
 }
 
 fn cmdFind(allocator: Allocator, args: []const []const u8) !void {
-    if (args.len == 0) fatal("Usage: dot find <query>\n", .{});
+    if (args.len == 0 or hasFlag(args, "--help") or hasFlag(args, "-h")) {
+        const w = stdout();
+        try w.writeAll(
+            \\Usage: dot find <query>
+            \\
+            \\Search all dots (open first, then archived).
+            \\
+            \\Searches: title, description, close-reason, created-at, closed-at
+            \\
+            \\Examples:
+            \\  dot find "auth"      Search for dots mentioning auth
+            \\  dot find "2026-01"   Find dots from January 2026
+            \\
+        );
+        return;
+    }
 
     var storage = try openStorage(allocator);
     defer storage.close();
@@ -550,7 +614,14 @@ fn cmdFind(allocator: Allocator, args: []const []const u8) !void {
 
     const w = stdout();
     for (issues) |issue| {
-        try w.print("[{s}] {c} {s}\n", .{ issue.id, issue.status.char(), issue.title });
+        if (issue.status != .closed) {
+            try w.print("[{s}] {c} {s}\n", .{ issue.id, issue.status.char(), issue.title });
+        }
+    }
+    for (issues) |issue| {
+        if (issue.status == .closed) {
+            try w.print("[{s}] {c} {s}\n", .{ issue.id, issue.status.char(), issue.title });
+        }
     }
 }
 

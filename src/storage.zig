@@ -915,6 +915,18 @@ pub const Storage = struct {
         return states[0].match.?;
     }
 
+    pub fn resolveIdActive(self: *Self, prefix: []const u8) ![]const u8 {
+        var states = [_]ResolveState{.{ .prefix = prefix }};
+        errdefer states[0].deinit(self.allocator);
+
+        try self.scanResolve(self.dots_dir, states[0..], null);
+
+        if (states[0].ambig) return StorageError.AmbiguousId;
+        if (states[0].match == null) return StorageError.IssueNotFound;
+
+        return states[0].match.?;
+    }
+
     pub fn resolveIds(self: *Self, prefixes: []const []const u8) ![]ResolveResult {
         var states = try self.allocator.alloc(ResolveState, prefixes.len);
         errdefer {
@@ -1976,7 +1988,7 @@ pub const Storage = struct {
     }
 
     pub fn searchIssues(self: *Self, query: []const u8) ![]Issue {
-        const all_issues = try self.listIssues(null);
+        const all_issues = try self.listAllIssuesIncludingArchived();
         defer self.allocator.free(all_issues);
 
         var matches: std.ArrayList(Issue) = .{};
@@ -1991,7 +2003,13 @@ pub const Storage = struct {
         };
 
         for (all_issues) |issue| {
-            if (containsIgnoreCase(issue.title, query) or containsIgnoreCase(issue.description, query)) {
+            const in_title = containsIgnoreCase(issue.title, query);
+            const in_desc = containsIgnoreCase(issue.description, query);
+            const in_reason = if (issue.close_reason) |r| containsIgnoreCase(r, query) else false;
+            const in_created = containsIgnoreCase(issue.created_at, query);
+            const in_closed = if (issue.closed_at) |c| containsIgnoreCase(c, query) else false;
+
+            if (in_title or in_desc or in_reason or in_created or in_closed) {
                 matches.appendAssumeCapacity(issue);
             } else {
                 issue.deinit(self.allocator);

@@ -17,6 +17,10 @@ Minimal task tracker for AI coding agents.
 
 A CLI task tracker with **zero dependencies** — tasks are plain markdown files with YAML frontmatter in `.dots/`. No database, no server, no configuration. Copy the folder between machines, commit to git, edit with any tool. Parent-child relationships map to folders. Each task has an ID, title, status, priority, and optional dependencies.
 
+## Contributing
+
+Please open an issue with the details of the feature you want, including the AI prompt if possible, instead of submitting PRs.
+
 ## Installation
 
 ### Homebrew
@@ -164,8 +168,11 @@ Lists tasks that are `open` and have no blocking dependencies (or blocker is `do
 ### Show Hierarchy
 
 ```bash
-dot tree
+dot tree [id]
 ```
+
+Without arguments: shows all open root dots and their children.
+With `id`: shows that specific dot's tree (including closed children).
 
 Output:
 ```
@@ -187,7 +194,7 @@ Promotes orphaned children to root and removes missing parent folders.
 ```bash
 dot find "query"
 ```
-Case-insensitive search in title and description.
+Case-insensitive search across title, description, close-reason, created-at, and closed-at. Shows open dots first, then archived.
 
 ### Purge Archive
 

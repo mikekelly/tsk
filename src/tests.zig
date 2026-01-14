@@ -319,6 +319,31 @@ fn trimNewline(input: []const u8) []const u8 {
     return std.mem.trimRight(u8, input, "\n");
 }
 
+fn normalizeTreeOutput(allocator: std.mem.Allocator, output: []const u8) ![]u8 {
+    var normalized = std.ArrayList(u8){};
+    errdefer normalized.deinit(allocator);
+
+    var lines = std.mem.splitScalar(u8, output, '\n');
+    while (lines.next()) |line| {
+        if (line.len == 0) continue;
+
+        if (std.mem.indexOf(u8, line, "[")) |start| {
+            if (std.mem.indexOfPos(u8, line, start, "]")) |end| {
+                try normalized.appendSlice(allocator, line[0..start]);
+                try normalized.appendSlice(allocator, "[ID]");
+                try normalized.appendSlice(allocator, line[end + 1 ..]);
+            } else {
+                try normalized.appendSlice(allocator, line);
+            }
+        } else {
+            try normalized.appendSlice(allocator, line);
+        }
+        try normalized.append(allocator, '\n');
+    }
+
+    return normalized.toOwnedSlice(allocator);
+}
+
 fn isExitCode(term: std.process.Child.Term, code: u8) bool {
     return switch (term) {
         .Exited => |actual| actual == code,
@@ -1014,6 +1039,39 @@ test "cli: parent creates folder structure" {
     try std.testing.expect(stat.kind == .directory);
 }
 
+test "cli: find help" {
+    const allocator = std.testing.allocator;
+
+    const test_dir = setupTestDirOrPanic(allocator);
+    defer cleanupTestDirAndFree(allocator, test_dir);
+
+    const help = runDot(allocator, &.{ "find", "--help" }, test_dir) catch |err| {
+        std.debug.panic("find help: {}", .{err});
+    };
+    defer help.deinit(allocator);
+
+    try std.testing.expect(isExitCode(help.term, 0));
+
+    const oh = OhSnap{};
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "Usage: dot find <query>
+        \\
+        \\Search all dots (open first, then archived).
+        \\
+        \\Searches: title, description, close-reason, created-at, closed-at
+        \\
+        \\Examples:
+        \\  dot find "auth"      Search for dots mentioning auth
+        \\  dot find "2026-01"   Find dots from January 2026
+        \\"
+    ).expectEqual(help.stdout);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  ""
+    ).expectEqual(help.stderr);
+}
+
 test "cli: find matches titles case-insensitively" {
     const allocator = std.testing.allocator;
 
@@ -1058,6 +1116,114 @@ test "cli: find matches titles case-insensitively" {
         }
     }
     try std.testing.expectEqual(@as(usize, 2), matches);
+}
+
+test "cli: find searches archive fields and orders results" {
+    const allocator = std.testing.allocator;
+
+    const test_dir = setupTestDirOrPanic(allocator);
+    defer cleanupTestDirAndFree(allocator, test_dir);
+
+    var ts = openTestStorage(allocator, test_dir);
+
+    const open_issue = Issue{
+        .id = "open-11111111",
+        .title = "Open task",
+        .description = "",
+        .status = .open,
+        .priority = 2,
+        .issue_type = "task",
+        .assignee = null,
+        .created_at = "2024-03-01T00:00:00Z",
+        .closed_at = null,
+        .close_reason = null,
+        .blocks = &.{},
+        .parent = null,
+    };
+    try ts.storage.createIssue(open_issue, null);
+
+    const closed_issue = Issue{
+        .id = "closed-22222222",
+        .title = "Closed task",
+        .description = "",
+        .status = .closed,
+        .priority = 2,
+        .issue_type = "task",
+        .assignee = null,
+        .created_at = "2024-01-01T00:00:00Z",
+        .closed_at = "2024-02-01T00:00:00Z",
+        .close_reason = "wontfix",
+        .blocks = &.{},
+        .parent = null,
+    };
+    try ts.storage.createIssue(closed_issue, null);
+    try ts.storage.archiveIssue("closed-22222222");
+    ts.deinit();
+
+    const find_task = runDot(allocator, &.{ "find", "task" }, test_dir) catch |err| {
+        std.debug.panic("find task: {}", .{err});
+    };
+    defer find_task.deinit(allocator);
+
+    const find_reason = runDot(allocator, &.{ "find", "wontfix" }, test_dir) catch |err| {
+        std.debug.panic("find reason: {}", .{err});
+    };
+    defer find_reason.deinit(allocator);
+
+    const find_created = runDot(allocator, &.{ "find", "2024-03" }, test_dir) catch |err| {
+        std.debug.panic("find created: {}", .{err});
+    };
+    defer find_created.deinit(allocator);
+
+    const find_closed = runDot(allocator, &.{ "find", "2024-02" }, test_dir) catch |err| {
+        std.debug.panic("find closed: {}", .{err});
+    };
+    defer find_closed.deinit(allocator);
+
+    try std.testing.expect(isExitCode(find_task.term, 0));
+    try std.testing.expect(isExitCode(find_reason.term, 0));
+    try std.testing.expect(isExitCode(find_created.term, 0));
+    try std.testing.expect(isExitCode(find_closed.term, 0));
+
+    const oh = OhSnap{};
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "[open-11111111] o Open task
+        \\[closed-22222222] x Closed task
+        \\"
+    ).expectEqual(find_task.stdout);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "[closed-22222222] x Closed task
+        \\"
+    ).expectEqual(find_reason.stdout);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "[open-11111111] o Open task
+        \\"
+    ).expectEqual(find_created.stdout);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "[closed-22222222] x Closed task
+        \\"
+    ).expectEqual(find_closed.stdout);
+
+    try oh.snap(@src(),
+        \\[]u8
+        \\  ""
+    ).expectEqual(find_task.stderr);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  ""
+    ).expectEqual(find_reason.stderr);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  ""
+    ).expectEqual(find_created.stderr);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  ""
+    ).expectEqual(find_closed.stderr);
 }
 
 test "cli: jsonl hydration imports issues and archives closed" {
@@ -2139,32 +2305,8 @@ test "snap: tree output format" {
     };
     defer tree.deinit(allocator);
 
-    // Normalize: replace IDs with placeholders
-    // Tree format: "[full-id] ○ Title" for parent, "  └─ [full-id] ○ Title" for children
-    var normalized = std.ArrayList(u8){};
-    defer normalized.deinit(allocator);
-
-    var lines = std.mem.splitScalar(u8, tree.stdout, '\n');
-    while (lines.next()) |line| {
-        if (line.len == 0) continue;
-
-        // Find "[" and "]" to replace ID
-        if (std.mem.indexOf(u8, line, "[")) |start| {
-            if (std.mem.indexOfPos(u8, line, start, "]")) |end| {
-                // Prefix before [
-                try normalized.appendSlice(allocator, line[0..start]);
-                // Replace ID with placeholder
-                try normalized.appendSlice(allocator, "[ID]");
-                // Rest of line after ]
-                try normalized.appendSlice(allocator, line[end + 1 ..]);
-            } else {
-                try normalized.appendSlice(allocator, line);
-            }
-        } else {
-            try normalized.appendSlice(allocator, line);
-        }
-        try normalized.append(allocator, '\n');
-    }
+    const normalized = try normalizeTreeOutput(allocator, tree.stdout);
+    defer allocator.free(normalized);
 
     const oh = OhSnap{};
     // Tree shows parent with children indented
@@ -2174,7 +2316,93 @@ test "snap: tree output format" {
         \\  └─ [ID] ○ Child one
         \\  └─ [ID] ○ Child two (blocked)
         \\"
-    ).expectEqual(normalized.items);
+    ).expectEqual(normalized);
+}
+
+test "cli: tree help" {
+    const allocator = std.testing.allocator;
+
+    const test_dir = setupTestDirOrPanic(allocator);
+    defer cleanupTestDirAndFree(allocator, test_dir);
+
+    const help = runDot(allocator, &.{ "tree", "--help" }, test_dir) catch |err| {
+        std.debug.panic("tree help: {}", .{err});
+    };
+    defer help.deinit(allocator);
+
+    try std.testing.expect(isExitCode(help.term, 0));
+
+    const oh = OhSnap{};
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "Usage: dot tree [id]
+        \\
+        \\Show dot hierarchy.
+        \\
+        \\Without arguments: shows all open root dots and their children.
+        \\With id: shows that specific dot's tree (including closed children).
+        \\
+        \\Examples:
+        \\  dot tree                    Show all open root dots
+        \\  dot tree my-project         Show specific dot and its children
+        \\"
+    ).expectEqual(help.stdout);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  ""
+    ).expectEqual(help.stderr);
+}
+
+test "cli: tree id shows specific root" {
+    const allocator = std.testing.allocator;
+
+    const test_dir = setupTestDirOrPanic(allocator);
+    defer cleanupTestDirAndFree(allocator, test_dir);
+
+    const init = runDot(allocator, &.{"init"}, test_dir) catch |err| {
+        std.debug.panic("init: {}", .{err});
+    };
+    defer init.deinit(allocator);
+
+    const parent1 = runDot(allocator, &.{ "add", "Parent one" }, test_dir) catch |err| {
+        std.debug.panic("add parent1: {}", .{err});
+    };
+    defer parent1.deinit(allocator);
+    const parent1_id = trimNewline(parent1.stdout);
+
+    const parent2 = runDot(allocator, &.{ "add", "Parent two" }, test_dir) catch |err| {
+        std.debug.panic("add parent2: {}", .{err});
+    };
+    defer parent2.deinit(allocator);
+
+    const child = runDot(allocator, &.{ "add", "Child one", "-P", parent1_id }, test_dir) catch |err| {
+        std.debug.panic("add child: {}", .{err});
+    };
+    defer child.deinit(allocator);
+    const child_id = trimNewline(child.stdout);
+
+    const off = runDot(allocator, &.{ "off", child_id }, test_dir) catch |err| {
+        std.debug.panic("off child: {}", .{err});
+    };
+    defer off.deinit(allocator);
+
+    const tree = runDot(allocator, &.{ "tree", parent1_id }, test_dir) catch |err| {
+        std.debug.panic("tree: {}", .{err});
+    };
+    defer tree.deinit(allocator);
+
+    try std.testing.expect(isExitCode(tree.term, 0));
+
+    const normalized = try normalizeTreeOutput(allocator, tree.stdout);
+    defer allocator.free(normalized);
+
+    const oh = OhSnap{};
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "[ID] ○ Parent one
+        \\  └─ [ID] ✓ Child one
+        \\"
+    ).expectEqual(normalized);
 }
 
 test "cli: tree ignores missing parent" {
