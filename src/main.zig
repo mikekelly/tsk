@@ -266,7 +266,9 @@ fn cmdAdd(allocator: Allocator, args: []const []const u8) !void {
     var description: []const u8 = "";
     var priority: i64 = default_priority;
     var parent: ?[]const u8 = null;
-    var after: ?[]const u8 = null;
+    var after: ?[]const u8 = null; // -a: creates blocks dependency
+    var position_after: ?[]const u8 = null; // --after: positioning
+    var position_before: ?[]const u8 = null; // --before: positioning
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -279,6 +281,10 @@ fn cmdAdd(allocator: Allocator, args: []const []const u8) !void {
             parent = v;
         } else if (getArg(args, &i, "-a")) |v| {
             after = v;
+        } else if (getArg(args, &i, "--after")) |v| {
+            position_after = v;
+        } else if (getArg(args, &i, "--before")) |v| {
+            position_before = v;
         } else if (title.len == 0 and args[i].len > 0 and args[i][0] != '-') {
             title = args[i];
         }
@@ -287,6 +293,9 @@ fn cmdAdd(allocator: Allocator, args: []const []const u8) !void {
     if (title.len == 0) fatal("Error: title required\n", .{});
     if (parent != null and after != null and std.mem.eql(u8, parent.?, after.?)) {
         fatal("Error: parent and after cannot be the same issue\n", .{});
+    }
+    if (position_after != null and position_before != null) {
+        fatal("Error: cannot use both --after and --before\n", .{});
     }
 
     var storage = try openStorage(allocator);
@@ -317,16 +326,62 @@ fn cmdAdd(allocator: Allocator, args: []const []const u8) !void {
     }
     defer if (resolved_after) |r| allocator.free(r);
 
-    // Resolve parent ID if provided
+    // Resolve positioning targets
+    var resolved_position_after: ?[]const u8 = null;
+    var resolved_position_before: ?[]const u8 = null;
+    if (position_after) |pos_id| {
+        resolved_position_after = storage.resolveId(pos_id) catch |err| switch (err) {
+            error.IssueNotFound => fatal("Position target not found: {s}\n", .{pos_id}),
+            error.AmbiguousId => fatal("Ambiguous ID: {s}\n", .{pos_id}),
+            else => return err,
+        };
+    }
+    defer if (resolved_position_after) |p| allocator.free(p);
+
+    if (position_before) |pos_id| {
+        resolved_position_before = storage.resolveId(pos_id) catch |err| switch (err) {
+            error.IssueNotFound => fatal("Position target not found: {s}\n", .{pos_id}),
+            error.AmbiguousId => fatal("Ambiguous ID: {s}\n", .{pos_id}),
+            else => return err,
+        };
+    }
+    defer if (resolved_position_before) |p| allocator.free(p);
+
+    // If positioning is specified but no parent, infer parent from position target
     var resolved_parent: ?[]const u8 = null;
+    var inferred_parent: ?[]const u8 = null;
     if (parent) |parent_id| {
         resolved_parent = storage.resolveId(parent_id) catch |err| switch (err) {
             error.IssueNotFound => fatal("Parent issue not found: {s}\n", .{parent_id}),
             error.AmbiguousId => fatal("Ambiguous ID: {s}\n", .{parent_id}),
             else => return err,
         };
+    } else if (resolved_position_after != null or resolved_position_before != null) {
+        // Infer parent from position target
+        const target_id = resolved_position_after orelse resolved_position_before.?;
+        const target_issue = storage.getIssue(target_id) catch |err| switch (err) {
+            error.IssueNotFound => fatal("Position target not found\n", .{}),
+            else => return err,
+        } orelse fatal("Position target not found\n", .{});
+        defer target_issue.deinit(allocator);
+
+        if (target_issue.parent) |p| {
+            inferred_parent = try allocator.dupe(u8, p);
+            resolved_parent = inferred_parent;
+        }
     }
-    defer if (resolved_parent) |p| allocator.free(p);
+    defer if (resolved_parent != null and inferred_parent == null) allocator.free(resolved_parent.?);
+    defer if (inferred_parent) |p| allocator.free(p);
+
+    // Calculate peer_index based on positioning
+    const peer_index = storage.calculatePeerIndex(
+        resolved_parent,
+        resolved_position_after,
+        resolved_position_before,
+    ) catch |err| switch (err) {
+        error.IssueNotFound => fatal("Position target not found among siblings\n", .{}),
+        else => return err,
+    };
 
     const issue = Issue{
         .id = id,
@@ -340,6 +395,7 @@ fn cmdAdd(allocator: Allocator, args: []const []const u8) !void {
         .closed_at = null,
         .close_reason = null,
         .blocks = blocks,
+        .peer_index = peer_index,
     };
 
     storage.createIssue(issue, resolved_parent) catch |err| switch (err) {
@@ -797,6 +853,7 @@ const JsonIssue = struct {
     created_at: []const u8,
     closed_at: ?[]const u8 = null,
     close_reason: ?[]const u8 = null,
+    peer_index: f64,
 };
 
 fn writeIssueJson(issue: Issue, w: *std.Io.Writer) !void {
@@ -810,6 +867,7 @@ fn writeIssueJson(issue: Issue, w: *std.Io.Writer) !void {
         .created_at = issue.created_at,
         .closed_at = issue.closed_at,
         .close_reason = issue.close_reason,
+        .peer_index = issue.peer_index,
     };
     try std.json.Stringify.value(json_issue, .{}, w);
 }

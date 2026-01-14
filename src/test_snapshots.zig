@@ -87,6 +87,7 @@ test "snap: markdown frontmatter format" {
         \\priority: 1
         \\issue-type: task
         \\created-at: <TIMESTAMP>
+        \\peer-index: 0
         \\---
         \\
         \\This is a description

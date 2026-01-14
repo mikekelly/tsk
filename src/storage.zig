@@ -125,11 +125,15 @@ pub const Issue = struct {
     closed_at: ?[]const u8,
     close_reason: ?[]const u8,
     blocks: []const []const u8,
+    peer_index: f64 = 0.0,
     // Computed from path, not stored in frontmatter
     parent: ?[]const u8 = null,
 
-    /// Compare issues by priority (ascending) then created_at (ascending)
+    /// Compare issues by peer_index (ascending), then priority (ascending), then created_at (ascending)
     pub fn order(_: void, a: Issue, b: Issue) bool {
+        // Sort by peer_index first
+        if (a.peer_index != b.peer_index) return a.peer_index < b.peer_index;
+        // Fall back to priority, then created_at
         if (a.priority != b.priority) return a.priority < b.priority;
         return std.mem.order(u8, a.created_at, b.created_at) == .lt;
     }
@@ -148,6 +152,7 @@ pub const Issue = struct {
             .closed_at = closed_at,
             .close_reason = close_reason,
             .blocks = self.blocks,
+            .peer_index = self.peer_index,
             .parent = self.parent,
         };
     }
@@ -166,6 +171,7 @@ pub const Issue = struct {
             .closed_at = self.closed_at,
             .close_reason = self.close_reason,
             .blocks = blocks,
+            .peer_index = self.peer_index,
             .parent = self.parent,
         };
     }
@@ -221,6 +227,7 @@ pub const Issue = struct {
             .closed_at = closed_at,
             .close_reason = close_reason,
             .blocks = try blocks.toOwnedSlice(allocator),
+            .peer_index = self.peer_index,
             .parent = parent,
         };
     }
@@ -330,6 +337,7 @@ const Frontmatter = struct {
     closed_at: ?[]const u8 = null,
     close_reason: ?[]const u8 = null,
     blocks: []const []const u8 = &.{},
+    peer_index: f64 = 0.0,
 };
 
 const ParseResult = struct {
@@ -357,6 +365,7 @@ const FrontmatterField = enum {
     closed_at,
     close_reason,
     blocks,
+    peer_index,
 };
 
 const frontmatter_field_map = std.StaticStringMap(FrontmatterField).initComptime(.{
@@ -369,6 +378,7 @@ const frontmatter_field_map = std.StaticStringMap(FrontmatterField).initComptime
     .{ "closed-at", .closed_at },
     .{ "close-reason", .close_reason },
     .{ "blocks", .blocks },
+    .{ "peer-index", .peer_index },
 });
 
 /// Result of parsing a YAML value - clearly indicates ownership
@@ -495,6 +505,7 @@ fn parseFrontmatter(allocator: Allocator, content: []const u8) !ParseResult {
             .closed_at => fm.closed_at = if (value.len > 0) value else null,
             .close_reason => fm.close_reason = if (value.len > 0) value else null,
             .blocks => in_blocks = true,
+            .peer_index => fm.peer_index = std.fmt.parseFloat(f64, value) catch return StorageError.InvalidFrontmatter,
         }
     }
 
@@ -597,6 +608,11 @@ fn serializeFrontmatter(allocator: Allocator, issue: Issue) ![]u8 {
             try buf.appendSlice(allocator, block_id);
         }
     }
+
+    try buf.appendSlice(allocator, "\npeer-index: ");
+    var peer_index_buf: [32]u8 = undefined;
+    const peer_index_str = std.fmt.bufPrint(&peer_index_buf, "{d}", .{issue.peer_index}) catch return error.OutOfMemory;
+    try buf.appendSlice(allocator, peer_index_str);
 
     try buf.appendSlice(allocator, "\n---\n");
 
@@ -1153,6 +1169,7 @@ pub const Storage = struct {
             .closed_at = closed_at,
             .close_reason = close_reason,
             .blocks = parsed.allocated_blocks,
+            .peer_index = parsed.frontmatter.peer_index,
             .parent = parent,
         };
     }
@@ -1444,6 +1461,7 @@ pub const Storage = struct {
             .closed_at = issue.closed_at,
             .close_reason = issue.close_reason,
             .blocks = issue.blocks,
+            .peer_index = issue.peer_index,
             .parent = issue.parent,
         };
 
@@ -1946,6 +1964,58 @@ pub const Storage = struct {
         std.mem.sort(Issue, children.items, {}, Issue.order);
 
         return children.toOwnedSlice(self.allocator);
+    }
+
+    /// Calculate the peer_index for a new issue based on positioning.
+    /// - If after_id is set: insert after that issue (midpoint with next sibling, or +1 if last)
+    /// - If before_id is set: insert before that issue (midpoint with prev sibling, or -1 if first)
+    /// - Otherwise: append at end (max peer_index + 1, or 0 if no siblings)
+    pub fn calculatePeerIndex(self: *Self, parent_id: ?[]const u8, after_id: ?[]const u8, before_id: ?[]const u8) !f64 {
+        // Get siblings (sorted by peer_index)
+        const siblings = if (parent_id) |pid|
+            try self.getChildIssues(pid)
+        else
+            try self.getRootIssues();
+        defer freeIssues(self.allocator, siblings);
+
+        if (siblings.len == 0) {
+            return 0.0;
+        }
+
+        if (after_id) |aid| {
+            // Find the target issue and calculate midpoint with next sibling
+            for (siblings, 0..) |sibling, i| {
+                if (std.mem.eql(u8, sibling.id, aid)) {
+                    if (i + 1 < siblings.len) {
+                        // Midpoint between target and next sibling
+                        return (sibling.peer_index + siblings[i + 1].peer_index) / 2.0;
+                    } else {
+                        // Last sibling, add 1
+                        return sibling.peer_index + 1.0;
+                    }
+                }
+            }
+            return StorageError.IssueNotFound;
+        }
+
+        if (before_id) |bid| {
+            // Find the target issue and calculate midpoint with previous sibling
+            for (siblings, 0..) |sibling, i| {
+                if (std.mem.eql(u8, sibling.id, bid)) {
+                    if (i > 0) {
+                        // Midpoint between previous sibling and target
+                        return (siblings[i - 1].peer_index + sibling.peer_index) / 2.0;
+                    } else {
+                        // First sibling, subtract 1
+                        return sibling.peer_index - 1.0;
+                    }
+                }
+            }
+            return StorageError.IssueNotFound;
+        }
+
+        // Default: append at end
+        return siblings[siblings.len - 1].peer_index + 1.0;
     }
 
     pub fn getChildren(self: *Self, parent_id: []const u8) ![]ChildIssue {
