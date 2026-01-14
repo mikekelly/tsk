@@ -1,6 +1,6 @@
 # tsk
 
-Minimal task tracker for AI coding agents. Fast, minimal task tracking with plain markdown files.
+Minimalist task tracking with plain markdown files, designed for AI agents
 
 This is an opinionated fork of [dots](https://github.com/joelreymont/dots).
 
