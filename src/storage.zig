@@ -329,9 +329,17 @@ const ParseResult = struct {
     // Track allocated strings for cleanup
     allocated_blocks: [][]const u8,
     allocated_title: ?[]const u8 = null,
+    allocated_created_at: ?[]const u8 = null,
+    allocated_closed_at: ?[]const u8 = null,
+    allocated_close_reason: ?[]const u8 = null,
+    allocated_assignee: ?[]const u8 = null,
 
     pub fn deinit(self: *const ParseResult, allocator: Allocator) void {
         if (self.allocated_title) |t| allocator.free(t);
+        if (self.allocated_created_at) |t| allocator.free(t);
+        if (self.allocated_closed_at) |t| allocator.free(t);
+        if (self.allocated_close_reason) |t| allocator.free(t);
+        if (self.allocated_assignee) |t| allocator.free(t);
         for (self.allocated_blocks) |b| allocator.free(b);
         allocator.free(self.allocated_blocks);
     }
@@ -435,8 +443,16 @@ fn parseFrontmatter(allocator: Allocator, content: []const u8) !ParseResult {
     var fm = Frontmatter{};
     var blocks_list: std.ArrayList([]const u8) = .{};
     var allocated_title: ?[]const u8 = null;
+    var allocated_created_at: ?[]const u8 = null;
+    var allocated_closed_at: ?[]const u8 = null;
+    var allocated_close_reason: ?[]const u8 = null;
+    var allocated_assignee: ?[]const u8 = null;
     errdefer {
         if (allocated_title) |t| allocator.free(t);
+        if (allocated_created_at) |t| allocator.free(t);
+        if (allocated_closed_at) |t| allocator.free(t);
+        if (allocated_close_reason) |t| allocator.free(t);
+        if (allocated_assignee) |t| allocator.free(t);
         for (blocks_list.items) |b| allocator.free(b);
         blocks_list.deinit(allocator);
     }
@@ -477,10 +493,32 @@ fn parseFrontmatter(allocator: Allocator, content: []const u8) !ParseResult {
                 allocated_title = parsed.getOwned();
             },
             .status => fm.status = Status.parse(value) orelse return StorageError.InvalidStatus,
-            .assignee => fm.assignee = if (value.len > 0) value else null,
-            .created_at => fm.created_at = value,
-            .closed_at => fm.closed_at = if (value.len > 0) value else null,
-            .close_reason => fm.close_reason = if (value.len > 0) value else null,
+            .assignee => {
+                if (value.len > 0) {
+                    const parsed = try parseYamlValue(allocator, value);
+                    fm.assignee = parsed.slice();
+                    allocated_assignee = parsed.getOwned();
+                }
+            },
+            .created_at => {
+                const parsed = try parseYamlValue(allocator, value);
+                fm.created_at = parsed.slice();
+                allocated_created_at = parsed.getOwned();
+            },
+            .closed_at => {
+                if (value.len > 0) {
+                    const parsed = try parseYamlValue(allocator, value);
+                    fm.closed_at = parsed.slice();
+                    allocated_closed_at = parsed.getOwned();
+                }
+            },
+            .close_reason => {
+                if (value.len > 0) {
+                    const parsed = try parseYamlValue(allocator, value);
+                    fm.close_reason = parsed.slice();
+                    allocated_close_reason = parsed.getOwned();
+                }
+            },
             .blocks => in_blocks = true,
             .peer_index => fm.peer_index = std.fmt.parseFloat(f64, value) catch return StorageError.InvalidFrontmatter,
         }
@@ -498,6 +536,22 @@ fn parseFrontmatter(allocator: Allocator, content: []const u8) !ParseResult {
             allocator.free(t);
             allocated_title = null; // Prevent errdefer double-free
         }
+        if (allocated_created_at) |t| {
+            allocator.free(t);
+            allocated_created_at = null;
+        }
+        if (allocated_closed_at) |t| {
+            allocator.free(t);
+            allocated_closed_at = null;
+        }
+        if (allocated_close_reason) |t| {
+            allocator.free(t);
+            allocated_close_reason = null;
+        }
+        if (allocated_assignee) |t| {
+            allocator.free(t);
+            allocated_assignee = null;
+        }
         return StorageError.InvalidFrontmatter;
     }
 
@@ -506,6 +560,10 @@ fn parseFrontmatter(allocator: Allocator, content: []const u8) !ParseResult {
         .description = description,
         .allocated_blocks = allocated_blocks,
         .allocated_title = allocated_title,
+        .allocated_created_at = allocated_created_at,
+        .allocated_closed_at = allocated_closed_at,
+        .allocated_close_reason = allocated_close_reason,
+        .allocated_assignee = allocated_assignee,
     };
 }
 
@@ -860,8 +918,12 @@ pub const Storage = struct {
         defer self.allocator.free(content);
 
         const parsed = try parseFrontmatter(self.allocator, content);
-        // Free allocated_title after duping
+        // Free allocated strings after duping
         defer if (parsed.allocated_title) |t| self.allocator.free(t);
+        defer if (parsed.allocated_created_at) |t| self.allocator.free(t);
+        defer if (parsed.allocated_closed_at) |t| self.allocator.free(t);
+        defer if (parsed.allocated_close_reason) |t| self.allocator.free(t);
+        defer if (parsed.allocated_assignee) |t| self.allocator.free(t);
         // Free allocated_blocks on error (transferred to Issue on success)
         var blocks_transferred = false;
         errdefer if (!blocks_transferred) {
