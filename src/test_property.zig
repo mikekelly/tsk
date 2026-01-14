@@ -310,12 +310,12 @@ test "prop: unknown id errors" {
             }
             const id = id_buf[0..];
 
-            const on_result = runTsk(allocator, &.{ "on", id }, test_dir) catch |err| {
-                std.debug.panic("on: {}", .{err});
+            const start_result = runTsk(allocator, &.{ "start", id }, test_dir) catch |err| {
+                std.debug.panic("start: {}", .{err});
             };
-            defer on_result.deinit(allocator);
-            if (!isExitCode(on_result.term, 1)) return false;
-            if (std.mem.indexOf(u8, on_result.stderr, "Issue not found") == null) return false;
+            defer start_result.deinit(allocator);
+            if (!isExitCode(start_result.term, 1)) return false;
+            if (std.mem.indexOf(u8, start_result.stderr, "Issue not found") == null) return false;
 
             const rm_result = runTsk(allocator, &.{ "rm", id }, test_dir) catch |err| {
                 std.debug.panic("rm: {}", .{err});

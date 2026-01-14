@@ -26,17 +26,21 @@ tsk add "Design schema" -P a1b2c3d4
 tsk add "Implement endpoints" -P a1b2c3d4 -a e5f6a7b8
 # Output: c9d0e1f2 
 
-# View hierarchy
+# Add task before/after another
+tsk add "Plan out endpoints" --before c9d0e1f2 
+# Output: aad9e1e4 
+
 tsk tree
 # [a1b2c3d4] o Build auth system
 #   +- [e5f6a7b8] o Design schema
+#   +- [aad9e1e4] o Plan out endpoints
 #   +- [c9d0e1f2] o Implement endpoints
 
 # Start working
-tsk on e5f6a7b8
+tsk start e5f6a7b8
 
 # Complete task
-tsk off e5f6a7b8 -r "Schema finalized"
+tsk complete e5f6a7b8 -r "Schema finalized"
 ```
 
 ## Installation
@@ -101,17 +105,24 @@ tsk add "Write tests" --after 3c4d5e6f
 # Output: 5e6f7a8b (positioned after 3c4d5e6f, same parent)
 ```
 
-### Start Working
+### Start Task
 
 ```bash
-tsk on <id> [id2 ...]
+tsk start <id> [id2 ...]
 ```
 Marks task(s) as `active`. Use when you begin working on tasks. Supports short ID prefixes.
+
+### Unstart Task
+
+```bash
+tsk unstart <id> [id2 ...]
+```
+Sets task(s) back to `open` status. Use when you want to stop working on a task without completing it.
 
 ### Complete Task
 
 ```bash
-tsk off <id> [id2 ...] [-r "reason"]
+tsk complete <id> [id2 ...] [-r "reason"]
 ```
 Marks task(s) as `done` and archives them. Optional reason applies to all. Root tasks are moved to `.tsk/archive/`. Child tasks wait for parent to close before moving.
 
@@ -224,7 +235,7 @@ IDs are 8-character random hex strings: `a3f2b1c8`
 Commands accept short prefixes:
 
 ```bash
-tsk on a3f2b1    # Matches a3f2b1c8
+tsk start a3f2b1    # Matches a3f2b1c8
 tsk show a3f     # Error if ambiguous (multiple matches)
 ```
 

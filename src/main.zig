@@ -22,8 +22,9 @@ const Command = struct { names: []const []const u8, handler: Handler };
 const commands = [_]Command{
     .{ .names = &.{ "add", "create" }, .handler = cmdAdd },
     .{ .names = &.{ "ls", "list" }, .handler = cmdList },
-    .{ .names = &.{ "on", "it" }, .handler = cmdOn },
-    .{ .names = &.{ "off", "done" }, .handler = cmdOff },
+    .{ .names = &.{ "start", "it" }, .handler = cmdStart },
+    .{ .names = &.{ "complete", "done" }, .handler = cmdComplete },
+    .{ .names = &.{"unstart"}, .handler = cmdUnstart },
     .{ .names = &.{ "rm", "delete" }, .handler = cmdRm },
     .{ .names = &.{"show"}, .handler = cmdShow },
     .{ .names = &.{"ready"}, .handler = cmdReady },
@@ -196,8 +197,9 @@ const USAGE =
     \\  tsk "title"                  Quick add a task
     \\  tsk add "title" [options]    Add a task (-d desc, -P parent, -a after)
     \\  tsk ls [--status S] [--json] List tasks
-    \\  tsk on <id>                  Start working (turn it on!)
-    \\  tsk off <id> [-r reason]     Complete ("cross it off")
+    \\  tsk start <id>               Start working on a task
+    \\  tsk complete <id> [-r reason] Complete a task
+    \\  tsk unstart <id>             Set task back to open
     \\  tsk rm <id>                  Remove a task
     \\  tsk show <id>                Show task details
     \\  tsk ready [--json]           Show unblocked tasks
@@ -211,8 +213,8 @@ const USAGE =
     \\  tsk "Fix the bug"
     \\  tsk add "Design API" -d "REST endpoints"
     \\  tsk add "Implement" -P tsk-1 -a tsk-2
-    \\  tsk on tsk-3
-    \\  tsk off tsk-3 -r "shipped"
+    \\  tsk start tsk-3
+    \\  tsk complete tsk-3 -r "shipped"
     \\
 ;
 
@@ -449,8 +451,8 @@ fn writeIssueList(issues: []const Issue, skip_done: bool, use_json: bool) !void 
     }
 }
 
-fn cmdOn(allocator: Allocator, args: []const []const u8) !void {
-    if (args.len == 0) fatal("Usage: tsk on <id> [id2 ...]\n", .{});
+fn cmdStart(allocator: Allocator, args: []const []const u8) !void {
+    if (args.len == 0) fatal("Usage: tsk start <id> [id2 ...]\n", .{});
 
     var storage = try openStorage(allocator);
     defer storage.close();
@@ -467,8 +469,26 @@ fn cmdOn(allocator: Allocator, args: []const []const u8) !void {
     }
 }
 
-fn cmdOff(allocator: Allocator, args: []const []const u8) !void {
-    if (args.len == 0) fatal("Usage: tsk off <id> [id2 ...] [-r reason]\n", .{});
+fn cmdUnstart(allocator: Allocator, args: []const []const u8) !void {
+    if (args.len == 0) fatal("Usage: tsk unstart <id> [id2 ...]\n", .{});
+
+    var storage = try openStorage(allocator);
+    defer storage.close();
+
+    const results = try storage.resolveIds(args);
+    defer storage_mod.freeResolveResults(allocator, results);
+
+    for (results, 0..) |result, i| {
+        switch (result) {
+            .ok => |id| try storage.updateStatus(id, .open, null, null),
+            .not_found => fatal("Issue not found: {s}\n", .{args[i]}),
+            .ambiguous => fatal("Ambiguous ID: {s}\n", .{args[i]}),
+        }
+    }
+}
+
+fn cmdComplete(allocator: Allocator, args: []const []const u8) !void {
+    if (args.len == 0) fatal("Usage: tsk complete <id> [id2 ...] [-r reason]\n", .{});
 
     var reason: ?[]const u8 = null;
     var ids: std.ArrayList([]const u8) = .{};
@@ -483,7 +503,7 @@ fn cmdOff(allocator: Allocator, args: []const []const u8) !void {
         }
     }
 
-    if (ids.items.len == 0) fatal("Usage: tsk off <id> [id2 ...] [-r reason]\n", .{});
+    if (ids.items.len == 0) fatal("Usage: tsk complete <id> [id2 ...] [-r reason]\n", .{});
 
     var storage = try openStorage(allocator);
     defer storage.close();

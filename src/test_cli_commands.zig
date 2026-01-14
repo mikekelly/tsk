@@ -108,10 +108,10 @@ test "cli: purge removes archived tasks" {
 
     const id = trimNewline(add.stdout);
 
-    const off = runTsk(allocator, &.{ "off", id }, test_dir) catch |err| {
-        std.debug.panic("off: {}", .{err});
+    const complete = runTsk(allocator, &.{ "complete", id }, test_dir) catch |err| {
+        std.debug.panic("complete: {}", .{err});
     };
-    defer off.deinit(allocator);
+    defer complete.deinit(allocator);
 
     // Verify archive has content
     const archive_path = std.fmt.allocPrint(allocator, "{s}/.tsk/archive", .{test_dir}) catch |err| {
@@ -556,10 +556,10 @@ test "cli: tree id shows specific root" {
     defer child.deinit(allocator);
     const child_id = trimNewline(child.stdout);
 
-    const off = runTsk(allocator, &.{ "off", child_id }, test_dir) catch |err| {
-        std.debug.panic("off child: {}", .{err});
+    const complete = runTsk(allocator, &.{ "complete", child_id }, test_dir) catch |err| {
+        std.debug.panic("complete child: {}", .{err});
     };
-    defer off.deinit(allocator);
+    defer complete.deinit(allocator);
 
     const tree = runTsk(allocator, &.{ "tree", parent1_id }, test_dir) catch |err| {
         std.debug.panic("tree: {}", .{err});
@@ -701,4 +701,82 @@ test "cli: fix promotes orphan children" {
         error.FileNotFound => {},
         else => std.debug.panic("open orphan dir: {}", .{err}),
     }
+}
+
+test "cli: unstart sets task back to open" {
+    const allocator = std.testing.allocator;
+
+    const test_dir = setupTestDirOrPanic(allocator);
+    defer cleanupTestDirAndFree(allocator, test_dir);
+
+    const init = runTsk(allocator, &.{"init"}, test_dir) catch |err| {
+        std.debug.panic("init: {}", .{err});
+    };
+    defer init.deinit(allocator);
+
+    // Create a task
+    const add = runTsk(allocator, &.{ "add", "Test task" }, test_dir) catch |err| {
+        std.debug.panic("add: {}", .{err});
+    };
+    defer add.deinit(allocator);
+
+    const id = trimNewline(add.stdout);
+
+    // Start the task (sets to active)
+    const start = runTsk(allocator, &.{ "start", id }, test_dir) catch |err| {
+        std.debug.panic("start: {}", .{err});
+    };
+    defer start.deinit(allocator);
+    try std.testing.expect(isExitCode(start.term, 0));
+
+    // Verify task is now active
+    {
+        var ts = openTestStorage(allocator, test_dir);
+        defer ts.deinit();
+
+        const active_issue = ts.storage.getIssue(id) catch |err| {
+            std.debug.panic("get issue: {}", .{err});
+        };
+        defer if (active_issue) |issue| issue.deinit(allocator);
+        try std.testing.expect(active_issue.?.status == .active);
+    }
+
+    // Unstart the task (sets back to open)
+    const unstart = runTsk(allocator, &.{ "unstart", id }, test_dir) catch |err| {
+        std.debug.panic("unstart: {}", .{err});
+    };
+    defer unstart.deinit(allocator);
+    try std.testing.expect(isExitCode(unstart.term, 0));
+
+    // Verify task is now open again
+    {
+        var ts = openTestStorage(allocator, test_dir);
+        defer ts.deinit();
+
+        const open_issue = ts.storage.getIssue(id) catch |err| {
+            std.debug.panic("get issue after unstart: {}", .{err});
+        };
+        defer if (open_issue) |issue| issue.deinit(allocator);
+        try std.testing.expect(open_issue.?.status == .open);
+    }
+}
+
+test "cli: unstart with invalid id fails" {
+    const allocator = std.testing.allocator;
+
+    const test_dir = setupTestDirOrPanic(allocator);
+    defer cleanupTestDirAndFree(allocator, test_dir);
+
+    const init = runTsk(allocator, &.{"init"}, test_dir) catch |err| {
+        std.debug.panic("init: {}", .{err});
+    };
+    defer init.deinit(allocator);
+
+    const result = runTsk(allocator, &.{ "unstart", "nonexistent" }, test_dir) catch |err| {
+        std.debug.panic("unstart: {}", .{err});
+    };
+    defer result.deinit(allocator);
+
+    try std.testing.expect(isExitCode(result.term, 1));
+    try std.testing.expect(std.mem.indexOf(u8, result.stderr, "Issue not found") != null);
 }
